@@ -43,7 +43,7 @@ def backfill_pipeline(
             features_pipeline.run(settings, resolved)
             if retrain:
                 record["train"] = train_pipeline.run(settings, resolved, trigger="backfill")
-            record["predict"] = predict_pipeline.run(settings, resolved)
+            record["predict"] = predict_pipeline.run(settings, resolved, trigger="backfill")
             record["status"] = "ok"
         except Exception as error:  # noqa: BLE001 - backfill harus lanjut
             record["status"] = "failed"

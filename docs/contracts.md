@@ -160,6 +160,7 @@ Kunci: `(date)`.
 | `persistence` | koefisien mean reversion (`EWMA_LAMBDA` default 0.94) |
 | `n_train`, `n_val`, `n_test`, `i_tr`, `i_va`, `n_real` | batas split |
 | `n_features`, `data_fingerprint` | jumlah fitur & hash tabel |
+| `window` | panjang jendela sequence (dipakai payload) |
 
 ### `gold/predictions/as_of=<D>/data.parquet`
 
@@ -174,7 +175,10 @@ Kunci: `(date)`.
 | `cumulative_variance_pct2` | float | jumlah varians dari H+1 sampai H+k |
 | `annualized_volatility_pct` | float | `vol·√252` |
 | `risk_regime` | str | `HIGH` bila `vol > tau` |
-| `prob_high` | float | keluaran head klasifikasi GRU |
+| `prob_high` | float | keluaran head klasifikasi GRU (selalu dari GRU, apa pun model variansnya) |
+| `tau` | float | ambang rezim yang dipakai (dibekukan di baris ini, bukan dibaca dari champion) |
+| `persistence` | float | koefisien mean reversion model terpilih |
+| `ml_return_enabled` | bool | apakah model return dipakai (gate lulus) |
 | `expected_log_return_pct` | float | return harian yang diharapkan |
 | `cumulative_expected_return_pct` | float | akumulasi |
 | `median_close_price` | float | `last_close·exp(cum/100)` |
@@ -187,6 +191,29 @@ Kunci: `(as_of, horizon_step)`.
 ### `gold/regime/as_of=<D>/data.parquet`
 
 `as_of`, `run_id`, `horizon_step`, `target_date`, `prob_high`, `risk_regime`.
+
+### `gold/candidates/as_of=<D>/data.parquet`
+
+Semua kandidat model volatilitas pada satu run. `predict` **hanya** membaca tabel
+ini, sehingga tidak ada train/serve skew dan prediksi tidak butuh torch.
+
+| Kolom | Keterangan |
+|---|---|
+| `as_of`, `run_id`, `model` | kunci; `model` ∈ `gru`, `har`, `garch`, `ewma`, `hist` |
+| `val_qlike`, `test_qlike` | QLIKE h=1 pada validasi & uji |
+| `h1_var` | ramalan varians untuk sesi berikutnya (skala %²) |
+| `uncond`, `persistence` | parameter mean reversion model tersebut |
+| `prob_high` | hanya terisi untuk `gru` |
+| `selected` | `true` untuk model dengan QLIKE validasi terendah |
+
+### `gold/published/as_of=<D>/data.parquet`
+
+Penanda bahwa prediksi sudah lengkap. `as_of`, `run_id`, `model_vol`,
+`horizons`, `ok`. Handler menolak menyajikan `as_of` tanpa penanda ini.
+
+### `gold/_dq/as_of=<D>/data.parquet`
+
+Kualitas fitur: kelengkapan fitur/target, jumlah baris yang dibuang saat warm-up.
 
 ### `gold/regime_eval/as_of=<D>/data.parquet`
 
@@ -204,21 +231,21 @@ Perbandingan varians pada periode uji:
 
 Format panjang:
 
-`as_of`, `run_id`, `split` (`val`/`test`), `model` (`gru`/`har`/`garch`/`ewma`/`hist`),
-`metric` (`qlike`/`rmse_vol`), `horizon`, `value`.
+`as_of`, `run_id`, `split` (`val`/`test`), `model`, `metric`, `horizon`, `value`.
 
-Kunci: `(as_of, run_id, split, model, metric, horizon)`.
+`metric` ∈ `qlike`, `rmse_vol` (h=1..7), `dm_p_vs_har` (h=1..7), `dm_p_vs_garch`,
+`r2_oos` (model `ridge`). Kunci: `(as_of, run_id, split, model, metric, horizon)`.
 
 ### `gold/run_log/as_of=<D>/data.parquet`
 
 | Kolom | Keterangan |
 |---|---|
-| `as_of`, `run_id` | kunci |
+| `as_of`, `stage`, `run_id` | kunci; `stage` ∈ `silver`, `train`, `predict` |
 | `trigger` | `manual` / `schedule` / `backfill` / `api` |
-| `stage`, `status` | `train`, `ok` |
-| `promoted` | apakah challenger menggantikan champion |
-| `val_metric`, `test_metric` | QLIKE |
-| `duration_s` | durasi (informasional, tidak dipakai untuk hash) |
+| `status` | `ok` / `failed` |
+| `promoted` | apakah kandidat terbaik menggantikan champion |
+| `val_metric`, `test_metric` | QLIKE model terpilih |
+| `duration_s` | durasi (informasional) |
 | `data_fingerprint`, `config_hash`, `git_sha` | lineage |
 
 ### `gold/champion/data.parquet`

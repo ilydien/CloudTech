@@ -167,3 +167,57 @@ def garch_walk_forward(
         persistence[start - s0 : end - s0] = fit["persistence"]
 
     return out, uncond, persistence
+
+
+# ---------------------------------------------------------------------------
+# Ramalan satu langkah untuk sesi berikutnya (dipakai pemilihan model)
+# ---------------------------------------------------------------------------
+def hist_forecast_next(returns_pct: np.ndarray, n_real: int) -> float:
+    """Varians historis seluruh riwayat sampai ``n_real-1``."""
+    series = np.asarray(returns_pct[:n_real], dtype=float)
+    finite = series[np.isfinite(series)]
+    if finite.size < 30:
+        return float("nan")
+    return float(np.var(finite, ddof=1))
+
+
+def ewma_forecast_next(returns_pct: np.ndarray, n_real: int, decay: float = 0.94) -> float:
+    series = np.asarray(returns_pct[:n_real], dtype=float)
+    history = ewma_var(series, decay)
+    if not np.isfinite(history[-1]):
+        return hist_forecast_next(returns_pct, n_real)
+    return float(decay * history[-1] + (1.0 - decay) * series[-1] ** 2)
+
+
+def har_forecast_next(tv: np.ndarray, n_real: int) -> float:
+    """HAR-log satu langkah: fit pada seluruh riwayat, prediksi baris ``n_real``."""
+    design = _har_design(tv)
+    target = np.log(np.maximum(np.asarray(tv, dtype=float), EPS))
+    rows = np.isfinite(design[:n_real]).all(axis=1) & np.isfinite(target[:n_real])
+    if int(rows.sum()) < 30 or not np.isfinite(design[n_real]).all():
+        return float("nan")
+    matrix = np.column_stack([np.ones(int(rows.sum())), design[:n_real][rows]])
+    coefficients = np.linalg.lstsq(matrix, target[:n_real][rows], rcond=None)[0]
+    residuals = target[:n_real][rows] - matrix @ coefficients
+    smearing = float(np.mean(np.exp(residuals)))
+    forecast = float(np.concatenate([[1.0], design[n_real]]) @ coefficients)
+    return float(np.exp(forecast) * smearing)
+
+
+def garch_forecast_next(
+    returns_pct: np.ndarray, n_real: int, kind: str = "garch"
+) -> tuple[float, float, float]:
+    """GARCH satu langkah. Return ``(variance_h1, uncond, persistence)``."""
+    series = np.asarray(returns_pct[:n_real], dtype=float)
+    finite = np.isfinite(series)
+    if int(finite.sum()) < 100:
+        fallback = hist_forecast_next(returns_pct, n_real)
+        return fallback, fallback, 0.94
+    fit = _fit_garch(series[finite], kind)
+    shock = float(series[n_real - 1]) - fit["mu"]
+    variance = (
+        fit["omega"]
+        + (fit["alpha"] + fit["gamma"] * (shock < 0)) * shock**2
+        + fit["beta"] * float(fit["cond_var"][-1])
+    )
+    return float(variance), float(fit["uncond"]), float(fit["persistence"])

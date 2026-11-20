@@ -1,12 +1,12 @@
 """Serving: handler murni yang dipakai bersama FastAPI dan Azure Function.
 
-Aturan desain:
-* handler **tidak** melatih model dan **tidak** mengunduh data. Ia hanya
-  membaca tabel gold yang sudah dihitung oleh job ``predict``.
-* keluaran berupa ``dict`` siap-``json.dumps``. JSON hanya ada di sini sebagai
-  *response HTTP*, bukan media penyimpanan.
-* payload deterministik: tanpa timestamp dinding, sehingga dua permintaan pada
-  ``as_of`` yang sama menghasilkan byte yang identik.
+Sejak perbaikan konsistensi, handler **tidak lagi membaca champion**. Semua
+angka yang disajikan berasal dari baris prediksi itu sendiri (``model_vol``,
+``tau``, ``persistence``, ``ml_return_enabled``), sehingga mustahil terjadi
+payload yang mencampur model baru dengan prediksi lama.
+
+Handler hanya menyajikan ``as_of`` yang sudah punya penanda ``gold/published``,
+jadi prediksi yang gagal separuh tidak akan pernah tampil sebagai "siap".
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from ihsg.storage import Sink, get_sink
 
 SERVICE_NAME = "IHSG-Forecasting-Engine"
 TICKER = "^JKSE"
+REGIME_CLASSIFIER = "gru"
 
 
 def _sink(settings: Settings, sink: Sink | None) -> Sink:
@@ -29,16 +30,17 @@ def _sink(settings: Settings, sink: Sink | None) -> Sink:
 
 
 def latest_as_of(settings: Settings, sink: Sink | None = None) -> str | None:
-    available = dataset.existing_as_of(_sink(settings, sink), dataset.GOLD_PREDICTIONS)
+    """Hanya ``as_of`` yang sudah dipublikasikan."""
+    available = dataset.existing_as_of(_sink(settings, sink), dataset.GOLD_PUBLISHED)
     return available[-1] if available else None
 
 
-def _metric_value(metrics: pd.DataFrame, model: str, metric: str, split: str) -> float | None:
+def _metric_value(metrics: pd.DataFrame, model: str, metric: str, split: str, horizon: int = 1) -> float | None:
     rows = metrics[
         (metrics["model"] == model)
         & (metrics["metric"] == metric)
         & (metrics["split"] == split)
-        & (metrics["horizon"] == 1)
+        & (metrics["horizon"] == horizon)
     ]
     if rows.empty:
         return None
@@ -46,14 +48,15 @@ def _metric_value(metrics: pd.DataFrame, model: str, metric: str, split: str) ->
 
 
 def _dq_summary(sink: Sink, as_of: str) -> dict:
-    frame = sink.try_read_parquet(dataset.as_of_key(dataset.SILVER_DQ, as_of))
-    if frame is None or frame.empty:
-        return {"checks": 0, "failed": 0}
-    return {
-        "checks": int(len(frame)),
-        "failed": int((~frame["passed"].astype(bool)).sum()),
-        "soft_failed": int(((~frame["passed"].astype(bool)) & (frame["severity"] != "hard")).sum()),
-    }
+    total = 0
+    failed = 0
+    for prefix in (dataset.SILVER_DQ, dataset.GOLD_DQ):
+        frame = sink.try_read_parquet(dataset.as_of_key(prefix, as_of))
+        if frame is None or frame.empty:
+            continue
+        total += int(len(frame))
+        failed += int((~frame["passed"].astype(bool)).sum())
+    return {"checks": total, "failed": failed}
 
 
 def build_payload(
@@ -65,15 +68,15 @@ def build_payload(
     sink = _sink(settings, sink)
     as_of = as_of or latest_as_of(settings, sink)
     if as_of is None:
-        raise LookupError("belum ada gold/predictions; jalankan job predict dulu")
+        raise LookupError("belum ada prediksi yang dipublikasikan; jalankan job predict dulu")
+
+    published = sink.try_read_parquet(dataset.as_of_key(dataset.GOLD_PUBLISHED, as_of))
+    if published is None or published.empty or not bool(published["ok"].iloc[0]):
+        raise LookupError(f"prediksi {as_of} belum dipublikasikan")
 
     predictions = sink.read_parquet(dataset.as_of_key(dataset.GOLD_PREDICTIONS, as_of))
-    champion_frame = sink.try_read_parquet(dataset.GOLD_CHAMPION)
-    if champion_frame is None or champion_frame.empty:
-        raise LookupError("champion belum ada; jalankan job train terlebih dahulu")
-    champion = champion_frame.iloc[0]
-    metrics = sink.try_read_parquet(dataset.as_of_key(dataset.GOLD_METRICS, as_of))
     params = sink.try_read_parquet(dataset.as_of_key(dataset.GOLD_PARAMS, as_of))
+    metrics = sink.try_read_parquet(dataset.as_of_key(dataset.GOLD_METRICS, as_of))
 
     predictions = predictions.sort_values("horizon_step")
     first = predictions.iloc[0]
@@ -101,12 +104,14 @@ def build_payload(
 
     validation: dict[str, float | None] = {}
     if metrics is not None and not metrics.empty:
+        model_vol = str(first.model_vol)
         validation = {
-            "gru_qlike_val": _metric_value(metrics, "gru", "qlike", "val"),
+            "selected_model_qlike_val": _metric_value(metrics, model_vol, "qlike", "val"),
+            "selected_model_qlike_test": _metric_value(metrics, model_vol, "qlike", "test"),
             "gru_qlike_test": _metric_value(metrics, "gru", "qlike", "test"),
             "har_qlike_test": _metric_value(metrics, "har", "qlike", "test"),
             "garch_qlike_test": _metric_value(metrics, "garch", "qlike", "test"),
-            "gru_rmse_vol_test": _metric_value(metrics, "gru", "rmse_vol", "test"),
+            "ridge_r2_oos_val": _metric_value(metrics, "ridge", "r2_oos", "val"),
             "ridge_r2_oos_test": _metric_value(metrics, "ridge", "r2_oos", "test"),
         }
 
@@ -114,14 +119,13 @@ def build_payload(
         "metadata": {
             "service": SERVICE_NAME,
             "version": __version__,
-            "schema_version": 1,
+            "schema_version": 2,
             "ticker": TICKER,
             "as_of": as_of,
             "base_date": str(first.base_date),
             "last_close": float(first.last_close),
             "run_id": str(first.run_id),
-            "data_fingerprint": str(champion["data_fingerprint"]),
-            "config_hash": str(champion["config_hash"]),
+            "data_fingerprint": str(params["data_fingerprint"].iloc[0]) if params is not None and not params.empty else "",
             "deterministic": True,
             "usage_note": (
                 "Jalankan setelah penutupan pasar AS dan sebelum pembukaan BEI. "
@@ -129,14 +133,14 @@ def build_payload(
             ),
         },
         "model": {
-            "volatility": str(champion["model_vol"]),
-            "return": str(champion["model_ret"]),
-            "ml_return_enabled": bool(champion["ml_return_enabled"]),
-            "window": int(champion["window"]),
-            "n_features": int(champion["n_features"]),
-            "tau_vol_pct": float(champion["tau"]),
-            "c_train": float(champion["c_train"]),
-            "persistence": float(champion["persistence"]),
+            "volatility": str(first.model_vol),
+            "return": str(first.model_ret),
+            "regime_classifier": REGIME_CLASSIFIER,
+            "ml_return_enabled": bool(first.ml_return_enabled),
+            "tau_vol_pct": float(first.tau),
+            "persistence": float(first.persistence),
+            "window": int(params["window"].iloc[0]) if params is not None and not params.empty else None,
+            "n_features": int(params["n_features"].iloc[0]) if params is not None and not params.empty else None,
         },
         "validation": validation,
         "forecast_horizons": horizons,

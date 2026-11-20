@@ -90,15 +90,24 @@ def cmd_run(args: argparse.Namespace) -> dict:
     # as_of hasil ingest bisa lebih awal dari kalender (provider tertinggal);
     # seluruh tahap berikutnya WAJIB memakai tanggal yang sama.
     as_of = ingest_result["as_of"]
+
+    # predict membaca gold/candidates, dan tabel itu hanya ada setelah train.
+    # Job harian karena itu melatih lebih dulu bila kandidat hari itu belum ada
+    # (biayanya ±3 detik; gate promosi mencegah champion berubah tanpa alasan).
+    sink = get_sink(settings)
+    needs_training = args.retrain or not sink.exists(
+        dataset.as_of_key(dataset.GOLD_CANDIDATES, as_of)
+    )
+
     stages: list[dict] = [
         ingest_result,
         silver_pipeline.run(settings, as_of),
         features_pipeline.run(settings, as_of),
     ]
-    if args.retrain:
+    if needs_training:
         stages.append(train_pipeline.run(settings, as_of, trigger=args.trigger))
-    stages.append(predict_pipeline.run(settings, as_of))
-    return {"stage": "run", "as_of": as_of, "stages": stages}
+    stages.append(predict_pipeline.run(settings, as_of, trigger=args.trigger))
+    return {"stage": "run", "as_of": as_of, "trained": needs_training, "stages": stages}
 
 
 def cmd_backfill(args: argparse.Namespace) -> dict:
@@ -118,7 +127,7 @@ def cmd_backfill(args: argparse.Namespace) -> dict:
             features_pipeline.run(settings, resolved)
             if args.retrain:
                 record["train"] = train_pipeline.run(settings, resolved, trigger="backfill")
-            record["predict"] = predict_pipeline.run(settings, resolved)
+            record["predict"] = predict_pipeline.run(settings, resolved, trigger="backfill")
             record["status"] = "ok"
         except Exception as error:  # noqa: BLE001 - backfill harus lanjut
             record["status"] = "failed"

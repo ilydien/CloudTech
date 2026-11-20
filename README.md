@@ -5,8 +5,8 @@ bursa, dengan arsitektur medallion (bronze/silver/gold) di atas object storage
 S3-compatible, orkestrasi Prefect, model deep learning GRU, dan output JSON lewat
 Azure Function.
 
-> **Status:** scaffold lengkap, **belum pernah dijalankan**. Lihat bagian
-> *Yang belum dikerjakan* di bawah sebelum demo.
+> **Status:** sudah dijalankan end-to-end di Docker Compose (Garage + Prefect image
+> + serving). Hasil nyata ada di bagian 11; yang belum dikerjakan di bagian 12.
 
 ---
 
@@ -126,6 +126,8 @@ Setelah itu:
 | **gold** | `gold/features/as_of=<D>/` | ditimpa | matriks fitur ber-lag + target |
 | | `gold/params/as_of=<D>/` | ditimpa | `c_train`, `tau`, LRV, batas split |
 | | `gold/predictions/as_of=<D>/` | ditimpa | ramalan 1..7 hari (**sumber JSON**) |
+| | `gold/candidates/as_of=<D>/` | ditimpa | QLIKE + ramalan h=1 semua kandidat; sumber `predict` |
+| | `gold/published/as_of=<D>/` | ditimpa | penanda prediksi lengkap (handler menolak tanpa ini) |
 | | `gold/regime/as_of=<D>/` | ditimpa | probabilitas rezim HIGH |
 | | `gold/regime_eval/as_of=<D>/` | ditimpa | klasifikasi periode uji (bahan dashboard) |
 | | `gold/vol_eval/as_of=<D>/` | ditimpa | varians aktual vs GRU/HAR/EWMA/hist |
@@ -169,22 +171,24 @@ Prefect 3, **work pool bertipe `process`** (tanpa `docker.sock`), tiga deploymen
 
 | Deployment | Cron (WIB) | Isi |
 |---|---|---|
-| `ihsg-daily-predict` | `15 5 * * 1-5` | ingest → silver → features → predict (detik) |
-| `ihsg-weekly-retrain` | `0 6 * * 6` | + train (menit) + gate promosi → predict |
+| `ihsg-daily-predict` | `15 5 * * 1-5` | ingest → silver → features → **train bila `gold/candidates` hari itu belum ada** → predict |
+| `ihsg-weekly-retrain` | `0 6 * * 6` | sama, dengan train eksplisit (gate promosi) |
 | `ihsg-backfill` | manual | rentang tanggal, `active: false` |
+
+Kenapa job harian ikut melatih: `predict` membaca `gold/candidates` (ramalan h=1
+semua model), dan tabel itu dihasilkan oleh tahap train. Biayanya ±3 detik, dan
+gate promosi memastikan champion tidak berubah hanya karena dijalankan ulang.
 
 Kenapa 05:15 WIB: data **EEM/^DJI** (fitur utama) baru final setelah pasar AS
 tutup (±04:00 WIB), sedangkan BEI buka 09:00 WIB.
 
-Trigger retrain juga tersedia lewat HTTP:
+Gate promosi: **kandidat dengan QLIKE validasi terendah** (di antara GRU, HAR,
+GARCH, EWMA, historis) menggantikan champion hanya bila lebih baik. Kalau kalah,
+tetap tercatat di `gold/run_log` (`promoted=false`).
 
 ```bash
 curl -X POST http://localhost:8080/admin/retrain -H "X-Admin-Token: $ADMIN_TOKEN"
 ```
-
-Gate promosi: challenger hanya menggantikan champion bila **QLIKE validasi** lebih
-kecil. Kalau kalah, tetap tercatat di `gold/run_log` (`promoted=false`) — itulah
-bukti retrain yang jujur.
 
 ---
 
@@ -277,27 +281,61 @@ Functions free tier, Blob <$0.1 → **jauh di bawah batas $80**.
 
 ---
 
-## 11. Yang belum dikerjakan (jujur)
+## 11. Hasil run nyata (20 November 2026)
 
-1. **Belum pernah dijalankan.** Assertion, path, dan signature sudah dicek
-   sintaksnya, tetapi integrasi (Garage ↔ s3fs ↔ pyarrow, Prefect deploy,
-   torch training) belum dieksekusi.
-2. **Belum ada uji integrasi**: golden test “payload dari data beku = hash X”
-   baru disiapkan sebagai `ihsg.cli verify`, belum ada hash acuan.
-3. **`IDX_HOLIDAYS` masih kosong** di `.env.example` — wajib diisi dari kalender
-   resmi BEI, kalau tidak tanggal target bisa jatuh di hari libur.
-4. **GARCH/GJR hanya dipakai sebagai benchmark** di `train`, belum diuji
-   stabilitas konvergensinya pada seluruh rentang.
-5. **Belum ada multi-node Garage** (replication factor 1). Opsi 2 node
-   didokumentasikan sebagai pekerjaan lanjutan.
-6. **Model return masih Ridge** (bukan deep learning). Gate produksinya
-   berdasarkan R²_OS + Clark–West di validasi.
-7. **`docs/contracts.md`** perlu diselaraskan lagi setelah run pertama, karena
-   kolom nyata bisa berbeda dari rancangan.
+Data: 2.144 baris panel, 2.109 baris fitur × 43 fitur, `as_of = 2026-11-19`.
+
+| Tahap | Durasi |
+|---|---|
+| ingest (2018→2026, 8 ticker) | 6,3 s |
+| silver | 3,6 s |
+| features | 3,4 s |
+| train (5 kandidat + evaluasi h=1..7) | 3,5 s |
+| predict | 3,3 s |
+
+QLIKE varians kumulatif pada **data uji**:
+
+| Model | h=1 | h=2 | h=4 | h=7 |
+|---|---|---|---|---|
+| gru | 0,7655 | 0,7731 | 0,7711 | 0,7721 |
+| garch | 0,5693 | 0,5632 | 0,5527 | 0,5645 |
+| **har** | **0,4898** | **0,4040** | **0,3591** | **0,3829** |
+| ewma | 0,6546 | 0,6624 | 0,6749 | 0,7144 |
+| hist | 1,0374 | 0,9112 | 0,8249 | 0,7718 |
+
+Temuan yang dilaporkan apa adanya:
+
+- **GRU kalah dari HAR di semua horizon** (DM p = 0,0002 pada h=1). Ini konsisten
+  dengan Hansen & Lunde (2005) dan hasil notebook: DL tidak otomatis mengalahkan
+  model long-memory sederhana.
+- **GARCH dipilih** karena QLIKE validasi h=1 terendah (0,2740). Di data uji HAR
+  ternyata lebih baik (0,4898 vs 0,5693) — pergeseran rezim, bukan bug.
+- Model return **gagal gate** (R²_OS validasi −0,012), sehingga produksi memakai
+  rata-rata historis dan `direction_signal = NO_SIGNAL`.
+- Klasifikasi rezim HIGH: AUC 0,771, precision 0,628, recall 0,360, base rate 17,8%.
 
 ---
 
-## 12. Batasan yang perlu ditulis di laporan
+## 12. Yang belum dikerjakan (jujur)
+
+1. **GRU belum di-refit walk-forward.** Baseline (HAR/GARCH) di-refit tiap 21 hari;
+   GRU dilatih sekali di 60% data. Jadi perbandingan DL vs baseline **belum
+   sepenuhnya setara** — ini perbaikan berikutnya yang paling berdampak.
+2. **`IDX_HOLIDAYS` masih kosong** di `.env.example` — wajib diisi dari kalender
+   resmi BEI, kalau tidak `target_date` bisa jatuh di hari libur.
+3. **Jalur Prefect belum diuji end-to-end** (server, work pool, deploy). Logika
+   flow sudah teruji lewat CLI, tetapi `prefect deploy --all` belum dijalankan.
+4. **Dashboard dimatikan** (`profiles: ["ui"]`) sesuai keputusan scope: fokus ke
+   gold + retrain. Kode tetap ada untuk pekerjaan lanjutan.
+5. **Belum ada uji integrasi otomatis** (golden hash) di CI; verifikasi hash masih
+   manual lewat `ihsg.cli verify`.
+6. **Multi-node Garage** (replication 2) belum dicoba.
+7. `requirements.txt` memuat `pytest`/`ruff` agar `make test` bisa jalan di image
+   tunggal — kompromi yang disengaja, bukan praktik produksi ideal.
+
+---
+
+## 13. Batasan yang perlu ditulis di laporan
 
 - yfinance adalah sumber **tidak resmi**: bisa terlambat, membalas kosong, atau
   membatasi laju. Karena itu bronze disimpan append-only — satu-satunya cara

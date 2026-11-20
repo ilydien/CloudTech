@@ -16,6 +16,7 @@ import pandas as pd
 from ihsg import dataset, indicators
 from ihsg.config import Settings
 from ihsg.instruments import INDEX_KEY, get_instruments
+from ihsg.quality import HARD, SOFT, CheckResult, write_report
 from ihsg.schemas import GOLD_FEATURES, GOLD_PARAMS, fingerprint, validate_contract
 from ihsg.storage import Sink, get_sink
 
@@ -86,7 +87,9 @@ def build_frame(panel: pd.DataFrame, settings: Settings, as_of: str) -> tuple[pd
     # Buang SEMUA baris yang fiturnya tidak lengkap, bukan hanya baris awal.
     # Kalau tidak, satu gap panjang pada salah satu instrumen (libur > FFILL_LIMIT)
     # akan menghasilkan NaN yang merambat ke standardisasi dan training.
+    total_rows = len(out)
     out = out.loc[complete].copy()
+    dropped = int(total_rows - len(out))
     out.index.name = "date"
     out = out.reset_index()
 
@@ -99,7 +102,7 @@ def build_frame(panel: pd.DataFrame, settings: Settings, as_of: str) -> tuple[pd
     if out[list(TARGET_COLUMNS)].iloc[:-1].isna().any().any():
         raise AssertionError("target historis mengandung NaN setelah pemangkasan")
 
-    meta = {"feature_columns": feature_columns, "skipped_volume": skipped_volume, "target_day": target_day}
+    meta = {"feature_columns": feature_columns, "skipped_volume": skipped_volume, "target_day": target_day, "rows_dropped": dropped}
     return out, meta
 
 
@@ -133,6 +136,7 @@ def compute_params(frame: pd.DataFrame, settings: Settings, as_of: str) -> dict:
         "i_va": int(i_va),
         "n_real": int(n_real),
         "n_features": int(len([c for c in frame.columns if c not in TARGET_COLUMNS and c != "date"])),
+        "window": int(settings.window),
         "data_fingerprint": fingerprint(frame),
     }
 
@@ -158,12 +162,48 @@ def run(
     sink.write_parquet(frame, dataset.as_of_key(dataset.GOLD_FEATURES, as_of), overwrite=True)
     sink.write_parquet(params_frame, dataset.as_of_key(dataset.GOLD_PARAMS, as_of), overwrite=True)
 
+    # Kualitas data layer gold: kelengkapan fitur & target, dan berapa baris
+    # yang dibuang karena warm-up/gap. Dicatat, bukan menghentikan run.
+    results = [
+        CheckResult(
+            layer="gold",
+            table="gold.features",
+            check_name="feature_completeness",
+            severity=HARD,
+            failed_count=int(frame[meta["feature_columns"]].isna().any(axis=1).sum()),
+            total_count=len(frame),
+            details={"columns": len(meta["feature_columns"])},
+        ),
+        CheckResult(
+            layer="gold",
+            table="gold.features",
+            check_name="target_completeness",
+            severity=HARD,
+            failed_count=int(frame["ret"].iloc[:-1].isna().sum()),
+            total_count=max(len(frame) - 1, 1),
+            details={"excluded": "baris hari-depan"},
+        ),
+        CheckResult(
+            layer="gold",
+            table="gold.features",
+            check_name="rows_dropped_incomplete",
+            severity=SOFT,
+            failed_count=int(meta["rows_dropped"]),
+            total_count=len(frame) + int(meta["rows_dropped"]),
+            details={"reason": "warmup/ffill limit"},
+        ),
+    ]
+    for result in results:
+        result.raise_if_hard()
+    write_report(sink, results, as_of, layer="gold")
+
     return {
         "stage": "features",
         "as_of": as_of,
         "status": "ok",
         "rows": int(len(frame)),
         "features": len(meta["feature_columns"]),
+        "rows_dropped": int(meta["rows_dropped"]),
         "skipped_volume": meta["skipped_volume"],
         "target_day": meta["target_day"],
         "c_train": round(params["c_train"], 6),

@@ -211,6 +211,9 @@ GOLD_PREDICTIONS = Contract(
         "annualized_volatility_pct": "float",
         "risk_regime": "str",
         "prob_high": "float",
+        "tau": "float",
+        "persistence": "float",
+        "ml_return_enabled": "bool",
         "expected_log_return_pct": "float",
         "cumulative_expected_return_pct": "float",
         "median_close_price": "float",
@@ -221,6 +224,43 @@ GOLD_PREDICTIONS = Contract(
     },
     keys=("as_of", "horizon_step"),
     not_null=("as_of", "horizon_step", "target_date"),
+)
+
+GOLD_CANDIDATES = Contract(
+    name="gold.candidates",
+    description=(
+        "Semua kandidat model volatilitas pada satu run: QLIKE validasi/uji dan "
+        "ramalan h=1 untuk sesi berikutnya. predict() hanya membaca tabel ini, "
+        "sehingga tidak ada lagi train/serve skew."
+    ),
+    columns={
+        "as_of": "str",
+        "run_id": "str",
+        "model": "str",
+        "val_qlike": "float",
+        "test_qlike": "float",
+        "h1_var": "float",
+        "uncond": "float",
+        "persistence": "float",
+        "prob_high": "float",
+        "selected": "bool",
+    },
+    keys=("as_of", "run_id", "model"),
+    not_null=("as_of", "run_id", "model"),
+)
+
+GOLD_PUBLISHED = Contract(
+    name="gold.published",
+    description="Penanda bahwa prediksi untuk as_of sudah lengkap dan aman disajikan.",
+    columns={
+        "as_of": "str",
+        "run_id": "str",
+        "model_vol": "str",
+        "horizons": "int",
+        "ok": "bool",
+    },
+    keys=("as_of",),
+    not_null=("as_of", "run_id"),
 )
 
 GOLD_REGIME = Contract(
@@ -286,7 +326,7 @@ GOLD_METRICS = Contract(
 
 GOLD_RUN_LOG = Contract(
     name="gold.run_log",
-    description="Riwayat run/retrain. Bukti 'retrain > 3x' tanpa bergantung pada UI orkestrator.",
+    description="Riwayat run per tahap. Bukti 'retrain > 3x' tanpa bergantung pada UI orkestrator.",
     columns={
         "as_of": "str",
         "run_id": "str",
@@ -301,7 +341,7 @@ GOLD_RUN_LOG = Contract(
         "config_hash": "str",
         "git_sha": "str",
     },
-    keys=("as_of", "run_id"),
+    keys=("as_of", "stage", "run_id"),
 )
 
 GOLD_PARAMS = Contract(
@@ -320,6 +360,7 @@ GOLD_PARAMS = Contract(
         "i_va": "int",
         "n_real": "int",
         "n_features": "int",
+        "window": "int",
         "data_fingerprint": "str",
     },
     keys=("as_of",),

@@ -12,6 +12,8 @@ Konsekuensinya: silver selalu bisa diturunkan ulang dari bronze -> idempoten.
 
 from __future__ import annotations
 
+import time
+
 import pandas as pd
 
 from ihsg import dataset, indicators
@@ -32,6 +34,7 @@ from ihsg.quality import (
     write_quarantine,
     write_report,
 )
+from ihsg.runlog import append_run
 from ihsg.schemas import SILVER_PANEL, SILVER_PRICES, fingerprint, validate_contract
 from ihsg.storage import Sink, get_sink
 
@@ -89,15 +92,33 @@ def _checks(
     prices: pd.DataFrame, instrument: Instrument, settings: Settings, as_of: str
 ) -> list[CheckResult]:
     table = f"silver.prices[{instrument.key}]"
+
+    # Calendar gap hanya bermakna bila kalender libur BEI diisi. Tanpa itu,
+    # setiap libur nasional akan terhitung sebagai "gap" dan DQ jadi bising.
+    if instrument.key == INDEX_KEY and settings.idx_holidays:
+        gap_check = check_calendar_gaps(prices, table, "silver", settings.idx_holidays)
+    else:
+        gap_check = CheckResult(
+            "silver",
+            table,
+            "calendar_gaps",
+            "info",
+            0,
+            len(prices),
+            {
+                "skipped": (
+                    "IDX_HOLIDAYS kosong" if instrument.key == INDEX_KEY else "bukan kalender BEI"
+                )
+            },
+        )
+
     results = [
         check_not_null(prices, table, "silver", ["date", "close", "adj_close"]),
         check_positive(
             prices, table, "silver", "close",
             severity=HARD if instrument.key == INDEX_KEY else SOFT,
         ),
-        check_calendar_gaps(prices, table, "silver", settings.idx_holidays)
-        if instrument.key == INDEX_KEY
-        else CheckResult("silver", table, "calendar_gaps", "info", 0, len(prices), {"skipped": "non-IDX"}),
+        gap_check,
         check_zero_volume_share(prices, table, "silver"),
         check_outliers(prices, table, "silver", "ret_cc_pct"),
         check_range(prices, table, "silver", "park_var", 0.0, 400.0),
@@ -159,6 +180,7 @@ def run(
     sink = sink or get_sink(settings)
     as_of = as_of or settings.as_of or dataset.resolve_as_of(settings)
     instruments = get_instruments(settings)
+    started = time.perf_counter()
 
     frames: dict[str, pd.DataFrame] = {}
     results: list[CheckResult] = []
@@ -196,6 +218,20 @@ def run(
     quarantine = pd.concat(non_empty, ignore_index=True) if non_empty else pd.DataFrame()
     write_report(sink, results, as_of, layer="silver")
     write_quarantine(sink, quarantine, as_of, layer="silver")
+
+    panel_fingerprint = fingerprint(panel)
+    duration = time.perf_counter() - started
+    append_run(
+        sink,
+        as_of=as_of,
+        run_id=f"silver-{panel_fingerprint[:12]}",
+        stage="silver",
+        trigger="pipeline",
+        status="ok",
+        duration_s=duration,
+        data_fingerprint=panel_fingerprint,
+        config_hash=settings.config_hash(),
+    )
 
     return {
         "stage": "silver",

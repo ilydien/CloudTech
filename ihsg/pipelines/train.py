@@ -1,19 +1,24 @@
-"""Gold/train: latih GRU, evaluasi terhadap baseline, dan putuskan promosi.
+"""Gold/train: latih GRU, bandingkan SEMUA kandidat, dan pilih pemenang.
 
-Pola **champion-challenger**:
-* model baru (challenger) dievaluasi di data validasi,
-* ia hanya menggantikan champion bila QLIKE validasi lebih baik,
-* keputusan promosi tetap dicatat walau kalah - inilah yang membuat riwayat
-  retrain bermakna (dan memenuhi bukti "retrain lebih dari 3x").
+Dua perubahan penting dibanding versi pertama:
 
-``run_id`` deterministik: ``sha256(as_of | config_hash | data_fingerprint)``.
-Retrain untuk tanggal & konfigurasi yang sama menghasilkan run_id yang sama,
-sehingga penulisan ulang bersifat idempoten dan bukan duplikat palsu.
+1. **Pemilihan model jujur.** Baseline (HAR, GARCH, EWMA, historis) ikut menjadi
+   kandidat, bukan sekadar pembanding di tabel. Champion = QLIKE validasi
+   terendah di antara semua kandidat. Sebelumnya GRU selalu dipromosikan walau
+   kalah, karena gate hanya membandingkannya dengan champion sebelumnya.
+
+2. **Evaluasi multi-horizon.** QLIKE/RMSE varians kumulatif untuk h=1..7 plus
+   uji Diebold-Mariano per horizon, supaya ramalan 7 hari punya bukti.
+
+Ramalan h=1 tiap kandidat untuk sesi berikutnya disimpan di ``gold/candidates``.
+``predict`` hanya membaca tabel itu, sehingga tidak ada lagi train/serve skew
+dan prediksi tidak membutuhkan torch.
 """
 
 from __future__ import annotations
 
 import hashlib
+import io
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -26,11 +31,12 @@ from ihsg import dataset, eval as metrics
 from ihsg.config import JAKARTA_TZ, Settings
 from ihsg.models import baselines, seq
 from ihsg.pipelines.features import TARGET_COLUMNS
+from ihsg.runlog import append_run
 from ihsg.schemas import (
+    GOLD_CANDIDATES,
     GOLD_CHAMPION,
     GOLD_METRICS,
     GOLD_REGIME_EVAL,
-    GOLD_RUN_LOG,
     GOLD_VOL_EVAL,
     fingerprint,
     validate_contract,
@@ -38,23 +44,12 @@ from ihsg.schemas import (
 from ihsg.storage import Sink, get_sink
 
 EPS = 1e-6
+FLAT_MODELS = ("hist", "ewma")
 
 
 def make_run_id(as_of: str, config_hash: str, data_fingerprint: str) -> str:
     payload = f"{as_of}|{config_hash}|{data_fingerprint}".encode()
     return hashlib.sha256(payload).hexdigest()[:16]
-
-
-def _git_sha() -> str:
-    """Stempel versi kode; kosong bila .git tidak tersedia di image."""
-    try:
-        import subprocess
-
-        return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL, text=True
-        ).strip()
-    except Exception:  # noqa: BLE001
-        return "unknown"
 
 
 def _standardise(train: np.ndarray, data: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -64,6 +59,9 @@ def _standardise(train: np.ndarray, data: np.ndarray) -> tuple[np.ndarray, np.nd
     return (data - mean) / scale, mean, scale
 
 
+# ---------------------------------------------------------------------------
+# Baris metrik
+# ---------------------------------------------------------------------------
 def _metric_rows(
     ends: np.ndarray,
     actual: np.ndarray,
@@ -111,11 +109,6 @@ def _dm_rows(
     challenger: str = "gru",
     benches: tuple[str, ...] = ("har", "garch", "ewma", "hist"),
 ) -> list[dict]:
-    """p-value Diebold-Mariano challenger vs tiap baseline (loss = QLIKE).
-
-    p kecil + statistik negatif = challenger lebih baik. Disimpan sebagai
-    ``metric='dm_p_vs_<bench>'`` agar tetap satu tabel dengan metrik lain.
-    """
     rows: list[dict] = []
     reference = forecasts.get(challenger)
     if reference is None:
@@ -152,6 +145,95 @@ def _dm_rows(
     return rows
 
 
+def _cumulative_forecast(
+    model: str, v1: np.ndarray, uncond: np.ndarray, persistence: np.ndarray, h: int
+) -> np.ndarray:
+    if model in FLAT_MODELS:
+        return h * v1
+    per = np.clip(persistence, 0.0, 0.9999)
+    factor = (1.0 - per**h) / (1.0 - per)
+    return h * uncond + (v1 - uncond) * factor
+
+
+def _multi_horizon_rows(
+    ends: np.ndarray,
+    tv: np.ndarray,
+    forecasts: dict[str, np.ndarray],
+    aux: dict[str, tuple[np.ndarray, np.ndarray]],
+    *,
+    as_of: str,
+    run_id: str,
+    split: str,
+    n_real: int,
+    horizons: int,
+) -> list[dict]:
+    """QLIKE/RMSE varians kumulatif h=2..H + DM tiap kandidat vs HAR.
+
+    h=1 tidak diulang di sini: sudah ditulis oleh ``_metric_rows``/``_dm_rows``
+    dengan kunci (model, metric, horizon) yang sama.
+    """
+    rows: list[dict] = []
+    for h in range(2, horizons + 1):
+        horizon_mask = ends <= (n_real - h)
+        if int(horizon_mask.sum()) < 10:
+            continue
+        horizon_ends = ends[horizon_mask]
+        actual = np.array([float(np.sum(tv[t : t + h])) for t in horizon_ends])
+
+        forecasts_at_h: dict[str, np.ndarray] = {}
+        for model, series in forecasts.items():
+            uncond, persistence = aux[model]
+            forecasts_at_h[model] = _cumulative_forecast(
+                model, series[horizon_ends], uncond[horizon_ends], persistence[horizon_ends], h
+            )
+
+        for model, values in forecasts_at_h.items():
+            valid = np.isfinite(actual) & np.isfinite(values)
+            if int(valid.sum()) < 10:
+                continue
+            rows.append(
+                {
+                    "as_of": as_of, "run_id": run_id, "split": split, "model": model,
+                    "metric": "qlike", "horizon": h,
+                    "value": float(metrics.qlike(actual[valid], values[valid]).mean()),
+                }
+            )
+            rows.append(
+                {
+                    "as_of": as_of, "run_id": run_id, "split": split, "model": model,
+                    "metric": "rmse_vol", "horizon": h,
+                    "value": float(
+                        np.sqrt(np.mean((np.sqrt(actual[valid]) - np.sqrt(values[valid])) ** 2))
+                    ),
+                }
+            )
+
+        reference = forecasts_at_h.get("har")
+        if reference is None:
+            continue
+        for model, values in forecasts_at_h.items():
+            if model == "har":
+                continue
+            valid = np.isfinite(actual) & np.isfinite(values) & np.isfinite(reference)
+            if int(valid.sum()) < 30:
+                continue
+            _, p_value = metrics.dm_test(
+                metrics.qlike(actual[valid], values[valid]),
+                metrics.qlike(actual[valid], reference[valid]),
+                h=h,
+            )
+            rows.append(
+                {
+                    "as_of": as_of, "run_id": run_id, "split": split, "model": model,
+                    "metric": "dm_p_vs_har", "horizon": h, "value": float(p_value),
+                }
+            )
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
 def run(
     settings: Settings,
     as_of: str | None = None,
@@ -169,7 +251,8 @@ def run(
 
     feature_names = [c for c in frame.columns if c not in (*TARGET_COLUMNS, "date")]
     data_fingerprint = str(params["data_fingerprint"])
-    run_id = make_run_id(as_of, settings.config_hash(), data_fingerprint)
+    config_hash = settings.config_hash()
+    run_id = make_run_id(as_of, config_hash, data_fingerprint)
 
     raw = frame[feature_names].to_numpy(dtype=float)
     returns = frame["ret"].to_numpy(dtype=float)
@@ -184,6 +267,8 @@ def run(
     i_tr = int(params["i_tr"])
     i_va = int(params["i_va"])
     n_real = int(params["n_real"])
+    long_run = float(params["long_run_var_pct2"])
+    persistence = float(params["persistence"])
 
     scaled, mean, scale = _standardise(raw[:i_tr], raw)
 
@@ -217,7 +302,7 @@ def run(
     )
     model = fitted["model"]
 
-    # --- baseline pada skala & periode yang sama ---------------------------
+    # --- baseline walk-forward --------------------------------------------
     forecasts: dict[str, np.ndarray] = {
         "hist": baselines.historical_var(returns[:n_real]),
         "ewma": baselines.ewma_var(returns[:n_real], settings.ewma_lambda),
@@ -228,17 +313,21 @@ def run(
     )
     forecasts["har"] = har
 
+    garch_uncond = np.full(n_real, np.nan)
+    garch_persistence = np.full(n_real, np.nan)
     try:
-        garch, _, _ = baselines.garch_walk_forward(
+        garch, uncond_series, persistence_series = baselines.garch_walk_forward(
             returns[:n_real], i_tr, n_real, "garch", settings.refit_every
         )
         garch_full = np.full(n_real, np.nan)
         garch_full[i_tr:n_real] = garch
         forecasts["garch"] = garch_full
+        garch_uncond[i_tr:n_real] = uncond_series
+        garch_persistence[i_tr:n_real] = persistence_series
     except Exception:  # noqa: BLE001 - arch tidak wajib untuk menjalankan pipeline
         pass
 
-    # --- prediksi model ----------------------------------------------------
+    # --- prediksi GRU walk-forward-in-sample -------------------------------
     gru_var = np.full(n_real, np.nan)
     gru_prob = np.full(n_real, np.nan)
     var_all, prob_all = seq.predict(model, X)
@@ -246,19 +335,39 @@ def run(
     gru_prob[ends] = prob_all
     forecasts["gru"] = gru_var
 
+    # Ramalan h=1 untuk sesi berikutnya (baris fitur terakhir = hari depan).
+    window_input = scaled[-settings.window :][None, :, :]
+    gru_next_var, gru_next_prob = seq.predict(model, window_input)
+    gru_next = float(gru_next_var[0])
+    prob_next = float(gru_next_prob[0])
+
+    # --- metrik h=1 --------------------------------------------------------
     metric_rows: list[dict] = []
     metric_rows += _metric_rows(ends[val_mask], tv, forecasts, as_of=as_of, run_id=run_id, split="val")
     metric_rows += _metric_rows(ends[test_mask], tv, forecasts, as_of=as_of, run_id=run_id, split="test")
     metric_rows += _dm_rows(ends[val_mask], tv, forecasts, as_of=as_of, run_id=run_id, split="val")
     metric_rows += _dm_rows(ends[test_mask], tv, forecasts, as_of=as_of, run_id=run_id, split="test")
 
-    val_qlike = next(
-        (row["value"] for row in metric_rows
-         if row["split"] == "val" and row["model"] == "gru" and row["metric"] == "qlike"),
-        float("nan"),
-    )
+    # --- metrik multi-horizon ---------------------------------------------
+    aux: dict[str, tuple[np.ndarray, np.ndarray]] = {
+        "hist": (np.full(n_real, long_run), np.zeros(n_real)),
+        "ewma": (np.full(n_real, long_run), np.zeros(n_real)),
+        "har": (np.full(n_real, long_run), np.full(n_real, persistence)),
+        "gru": (np.full(n_real, long_run), np.full(n_real, persistence)),
+    }
+    if "garch" in forecasts:
+        aux["garch"] = (
+            np.where(np.isfinite(garch_uncond), garch_uncond, long_run),
+            np.where(np.isfinite(garch_persistence), garch_persistence, persistence),
+        )
+    for split_name, mask in (("val", val_mask), ("test", test_mask)):
+        metric_rows += _multi_horizon_rows(
+            ends[mask], tv, forecasts, aux,
+            as_of=as_of, run_id=run_id, split=split_name,
+            n_real=n_real, horizons=settings.horizons,
+        )
 
-    # --- model return (gate produksi) --------------------------------------
+    # --- model return + gate ----------------------------------------------
     ridge = Ridge(alpha=settings.ridge_alpha)
     train_ok = np.isfinite(returns[:i_tr]) & np.isfinite(raw[:i_tr]).all(axis=1)
     if int(train_ok.sum()) < 30:
@@ -270,22 +379,95 @@ def run(
     _, val_cw_p = metrics.clark_west(
         returns[i_tr:i_va], ret_val, expanding_mean[i_tr:i_va], expanding_mean[i_tr:i_va]
     )
-    ml_return_enabled = bool(np.isfinite(val_r2) and val_r2 > 0 and np.isfinite(val_cw_p) and val_cw_p < settings.ml_gate_alpha)
+    ml_return_enabled = bool(
+        np.isfinite(val_r2) and val_r2 > 0
+        and np.isfinite(val_cw_p) and val_cw_p < settings.ml_gate_alpha
+    )
 
-    # Metrik model return (dilaporkan terpisah dari metrik volatilitas).
     ret_test = ridge.predict(raw[i_va:n_real])
     test_r2 = metrics.r2_oos(returns[i_va:n_real], ret_test, expanding_mean[i_va:n_real])
     _, test_cw_p = metrics.clark_west(
         returns[i_va:n_real], ret_test, expanding_mean[i_va:n_real], expanding_mean[i_va:n_real]
     )
-    metric_rows.append(
-        {"as_of": as_of, "run_id": run_id, "split": "val", "model": "ridge",
-         "metric": "r2_oos", "horizon": 1, "value": float(val_r2)}
-    )
-    metric_rows.append(
-        {"as_of": as_of, "run_id": run_id, "split": "test", "model": "ridge",
-         "metric": "r2_oos", "horizon": 1, "value": float(test_r2)}
-    )
+    for split_name, value in (("val", val_r2), ("test", test_r2)):
+        metric_rows.append(
+            {"as_of": as_of, "run_id": run_id, "split": split_name, "model": "ridge",
+             "metric": "r2_oos", "horizon": 1, "value": float(value)}
+        )
+
+    # --- kandidat + pemilihan model ---------------------------------------
+    val_qlike = {
+        row["model"]: row["value"]
+        for row in metric_rows
+        if row["split"] == "val" and row["metric"] == "qlike" and row["horizon"] == 1
+    }
+    test_qlike = {
+        row["model"]: row["value"]
+        for row in metric_rows
+        if row["split"] == "test" and row["metric"] == "qlike" and row["horizon"] == 1
+    }
+
+    har_next = baselines.har_forecast_next(tv, n_real)
+    hist_next = baselines.hist_forecast_next(returns, n_real)
+    ewma_next = baselines.ewma_forecast_next(returns, n_real, settings.ewma_lambda)
+
+    candidates_rows: list[dict] = [
+        {
+            "as_of": as_of, "run_id": run_id, "model": "gru",
+            "val_qlike": val_qlike.get("gru", np.nan),
+            "test_qlike": test_qlike.get("gru", np.nan),
+            "h1_var": gru_next, "uncond": long_run, "persistence": persistence,
+            "prob_high": prob_next, "selected": False,
+        },
+        {
+            "as_of": as_of, "run_id": run_id, "model": "har",
+            "val_qlike": val_qlike.get("har", np.nan),
+            "test_qlike": test_qlike.get("har", np.nan),
+            "h1_var": har_next, "uncond": long_run, "persistence": persistence,
+            "prob_high": np.nan, "selected": False,
+        },
+        {
+            "as_of": as_of, "run_id": run_id, "model": "ewma",
+            "val_qlike": val_qlike.get("ewma", np.nan),
+            "test_qlike": test_qlike.get("ewma", np.nan),
+            "h1_var": ewma_next, "uncond": long_run, "persistence": 0.0,
+            "prob_high": np.nan, "selected": False,
+        },
+        {
+            "as_of": as_of, "run_id": run_id, "model": "hist",
+            "val_qlike": val_qlike.get("hist", np.nan),
+            "test_qlike": test_qlike.get("hist", np.nan),
+            "h1_var": hist_next, "uncond": long_run, "persistence": 0.0,
+            "prob_high": np.nan, "selected": False,
+        },
+    ]
+    if "garch" in forecasts:
+        try:
+            garch_next, garch_next_uncond, garch_next_persistence = baselines.garch_forecast_next(
+                returns, n_real, "garch"
+            )
+            candidates_rows.append(
+                {
+                    "as_of": as_of, "run_id": run_id, "model": "garch",
+                    "val_qlike": val_qlike.get("garch", np.nan),
+                    "test_qlike": test_qlike.get("garch", np.nan),
+                    "h1_var": garch_next, "uncond": garch_next_uncond,
+                    "persistence": garch_next_persistence,
+                    "prob_high": np.nan, "selected": False,
+                }
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    candidates = pd.DataFrame(candidates_rows)
+    comparable = candidates[candidates["val_qlike"].notna()]
+    if comparable.empty:
+        raise RuntimeError("tidak ada kandidat dengan QLIKE validasi yang valid")
+    selected_model = str(comparable.loc[comparable["val_qlike"].idxmin(), "model"])
+    selected_qlike = float(comparable["val_qlike"].min())
+    candidates["selected"] = candidates["model"] == selected_model
+    validate_contract(candidates, GOLD_CANDIDATES)
+    sink.write_parquet(candidates, dataset.as_of_key(dataset.GOLD_CANDIDATES, as_of), overwrite=True)
 
     # --- keputusan promosi -------------------------------------------------
     champion_frame = sink.try_read_parquet(dataset.GOLD_CHAMPION)
@@ -294,9 +476,9 @@ def run(
         if champion_frame is not None and not champion_frame.empty
         else float("inf")
     )
-    promoted = bool(np.isfinite(val_qlike) and val_qlike <= previous_qlike)
+    promoted = bool(np.isfinite(selected_qlike) and selected_qlike <= previous_qlike)
 
-    # --- evaluasi yang dipakai dashboard -----------------------------------
+    # --- evaluasi untuk dashboard -----------------------------------------
     test_ends = ends[test_mask]
     regime_eval = pd.DataFrame({
         "as_of": as_of,
@@ -319,11 +501,7 @@ def run(
         "hist_var": forecasts["hist"][test_ends],
     })
 
-    test_qlike = next(
-        (row["value"] for row in metric_rows
-         if row["split"] == "test" and row["model"] == "gru" and row["metric"] == "qlike"),
-        float("nan"),
-    )
+    test_selected_qlike = float(test_qlike.get(selected_model, float("nan")))
     regime = metrics.regime_metrics(regime_eval["actual_high"], regime_eval["prob_high"])
 
     # --- tulis artefak -----------------------------------------------------
@@ -337,12 +515,9 @@ def run(
         dataset.artifact_key(run_id, "scaler.parquet"),
         overwrite=True,
     )
-
-    import io
-
+    buffer = io.BytesIO()
     import joblib
 
-    buffer = io.BytesIO()
     joblib.dump({"model": ridge, "features": feature_names}, buffer)
     sink.write_bytes(buffer.getvalue(), dataset.artifact_key(run_id, "ridge.joblib"), overwrite=True)
 
@@ -357,43 +532,38 @@ def run(
     sink.write_parquet(vol_eval, dataset.as_of_key(dataset.GOLD_VOL_EVAL, as_of), overwrite=True)
 
     duration = time.perf_counter() - started
-    run_log = pd.DataFrame([{
-        "as_of": as_of,
-        "run_id": run_id,
-        "trigger": trigger,
-        "stage": "train",
-        "status": "ok",
-        "promoted": promoted,
-        "val_metric": float(val_qlike),
-        "test_metric": float(test_qlike),
-        "duration_s": float(duration),
-        "data_fingerprint": data_fingerprint,
-        "config_hash": settings.config_hash(),
-        "git_sha": _git_sha(),
-    }])
-    validate_contract(run_log, GOLD_RUN_LOG)
-    existing = sink.try_read_parquet(dataset.as_of_key(dataset.GOLD_RUN_LOG, as_of))
-    combined = run_log if existing is None else pd.concat([existing, run_log], ignore_index=True)
-    combined = combined.drop_duplicates(subset=["as_of", "run_id"], keep="last")
-    sink.write_parquet(combined, dataset.as_of_key(dataset.GOLD_RUN_LOG, as_of), overwrite=True)
+    append_run(
+        sink,
+        as_of=as_of,
+        run_id=run_id,
+        stage="train",
+        trigger=trigger,
+        status="ok",
+        promoted=promoted,
+        val_metric=selected_qlike,
+        test_metric=test_selected_qlike,
+        duration_s=duration,
+        data_fingerprint=data_fingerprint,
+        config_hash=config_hash,
+    )
 
     if promoted:
         champion = pd.DataFrame([{
             "run_id": run_id,
             "trained_as_of": as_of,
-            "model_vol": "gru",
+            "model_vol": selected_model,
             "model_ret": "ridge" if ml_return_enabled else "expanding_mean",
-            "val_qlike": float(val_qlike),
+            "val_qlike": selected_qlike,
             "val_r2_oos": float(val_r2),
             "ml_return_enabled": ml_return_enabled,
             "tau": tau,
             "c_train": c_train,
-            "long_run_var_pct2": float(params["long_run_var_pct2"]),
-            "persistence": float(params["persistence"]),
+            "long_run_var_pct2": long_run,
+            "persistence": persistence,
             "window": int(settings.window),
             "horizons": int(settings.horizons),
             "n_features": int(len(feature_names)),
-            "config_hash": settings.config_hash(),
+            "config_hash": config_hash,
             "data_fingerprint": data_fingerprint,
         }])
         validate_contract(champion, GOLD_CHAMPION)
@@ -406,9 +576,15 @@ def run(
         "status": "ok",
         "trigger": trigger,
         "promoted": promoted,
+        "selected_model": selected_model,
+        "candidates": {
+            row["model"]: round(float(row["val_qlike"]), 6)
+            for row in candidates_rows
+            if np.isfinite(row["val_qlike"])
+        },
+        "val_qlike": round(float(selected_qlike), 6),
+        "test_qlike": None if not np.isfinite(test_selected_qlike) else round(test_selected_qlike, 6),
         "ml_return_enabled": ml_return_enabled,
-        "val_qlike": round(float(val_qlike), 6),
-        "test_qlike": round(float(test_qlike), 6),
         "val_r2_oos": round(float(val_r2), 6),
         "test_r2_oos": round(float(test_r2), 6),
         "val_clark_west_p": None if not np.isfinite(val_cw_p) else round(float(val_cw_p), 6),
