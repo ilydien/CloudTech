@@ -225,6 +225,21 @@ Terbukti berjalan: deployment terdaftar dengan `paused=false`, jadwal berikutnya
 lewat `prefect deployment run` berakhir `COMPLETED` dan menulis
 `gold/run_log` dengan `trigger=schedule`.
 
+![Prefect runs otomatis](docs/prefect-runs-auto.png)
+
+*Gambar 4.* Bukti eksekusi otomatis: jadwal diubah sementara menjadi `*/2` menit,
+lalu dua run (`camouflaged-dingo`, `merry-tarsier`) berjalan **tanpa intervensi**
+dan berakhir `Completed` (log: ingest `up_to_date` → silver 2.144 baris →
+features 2.109 baris → predict GARCH). Jadwal lalu dikembalikan ke cron asli.
+`gold/run_log` tetap 3 baris karena penulisan bersifat idempoten.
+
+![Prefect deployments](docs/prefect-deployments.png)
+
+*Gambar 3.* Dua deployment di Prefect UI (`http://localhost:4200/deployments`),
+keduanya `Ready`. Catatan operasional: container berjalan sebagai user non-root,
+jadi `PREFECT_UI_STATIC_DIRECTORY` diarahkan ke volume writable
+(`/home/app/.prefect/ui`) agar UI tidak 404.
+
 Kenapa job harian ikut melatih: `predict` membaca `gold/candidates` (ramalan h=1
 semua model), dan tabel itu dihasilkan oleh tahap train. Biayanya ±3 detik, dan
 gate promosi memastikan champion tidak berubah hanya karena dijalankan ulang.

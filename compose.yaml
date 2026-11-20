@@ -135,6 +135,10 @@ services:
       PREFECT_SERVER_API_HOST: 0.0.0.0
       PREFECT_SERVER_UI_API_URL: ${PREFECT_SERVER_UI_API_URL:-http://127.0.0.1:4200/api}
       PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@prefect-metadata:5432/prefect
+      # Container berjalan sebagai user 1000; site-packages tidak writable,
+      # sehingga Prefect gagal mengekstrak UI ke direktori bawaan (UI jadi 404).
+      # Arahkan ke volume yang writable.
+      PREFECT_UI_STATIC_DIRECTORY: /home/app/.prefect/ui
     volumes:
       - prefect-home:/home/app/.prefect
     healthcheck:
