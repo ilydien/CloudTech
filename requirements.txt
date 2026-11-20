@@ -1,0 +1,48 @@
+# ---------------------------------------------------------------------------
+# Runtime dependencies for the IHSG engine image.
+#
+# torch TIDAK ada di sini: di Dockerfile ia dipasang lebih dulu dari index CPU
+# (https://download.pytorch.org/whl/cpu) supaya image tidak menarik wheel CUDA.
+# Untuk pengembangan lokal tanpa Docker:
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1
+#   pip install -r requirements.txt
+#
+# Versi di-pin SEMUA. model.pt / scaler.parquet hanya kompatibel dengan versi
+# persis ini. Naikkan versi = wajib retrain ulang (lihat docs/contracts.md).
+# ---------------------------------------------------------------------------
+numpy==2.1.3
+pandas==2.2.3
+pyarrow==18.1.0
+scipy==1.14.1
+scikit-learn==1.5.2
+joblib==1.4.2
+
+# object storage
+s3fs==2024.10.0
+fsspec==2024.10.0
+
+# econometric benchmark (GARCH / GJR-GARCH)
+arch==7.2.0
+
+# sumber data
+yfinance==1.8.0
+
+# orchestration
+prefect==3.9.1
+# Prefect dengan backend Postgres (PREFECT_API_DATABASE_CONNECTION_URL)
+asyncpg==0.30.0
+
+# serving + dashboard
+# fastapi di-pin ke rentang yang dibutuhkan prefect 3.9.1 (>=0.139,<0.151)
+fastapi==0.149.0
+uvicorn==0.38.0
+streamlit==1.40.2
+
+# validasi tipe data & util
+python-dateutil==2.9.0.post0
+
+# --- alat pengembangan ------------------------------------------------------
+# Sengaja ikut di image tunggal supaya `make test` / `make lint` bisa
+# dijalankan tanpa install tambahan. Ukurannya kecil dan tidak dipakai runtime.
+pytest==8.3.3
+ruff==0.8.4

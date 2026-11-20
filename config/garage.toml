@@ -1,0 +1,28 @@
+# Garage v2.5 - single node, S3-compatible object storage.
+# Dijalankan dengan `garage server --single-node --default-access-key`
+# sehingga TIDAK perlu `layout assign/apply` (itu hanya untuk multi-node).
+
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "lmdb"
+metadata_auto_snapshot_interval = "24h"
+
+# Satu node = tidak ada replika. Naikkan ke 2 dan jalankan dua node
+# (zone dc1/dc2) kalau ingin mendemokan ketahanan node.
+replication_factor = 1
+compression_level = 4
+
+rpc_bind_addr = "[::]:3901"
+# rpc_public_addr = "garage:3901"
+
+[s3_api]
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage"
+
+[s3_web]
+bind_addr = "[::]:3902"
+root_domain = ".web.garage"
+
+[admin]
+api_bind_addr = "[::]:3903"

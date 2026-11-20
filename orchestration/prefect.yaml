@@ -1,0 +1,60 @@
+# Prefect 3 deployments.
+#
+# Kode TIDAK di-pull dari git: ia sudah ada di dalam image pada /app.
+# `set_working_directory` menunjuk ke folder ini supaya entrypoint relatif
+# (`flows/...`) bisa diselesaikan, sementara PYTHONPATH=/app membuat
+# `import ihsg` tetap bekerja.
+#
+# Setiap deployment punya concurrency_limit: 1 -> predict harian dan retrain
+# mingguan tidak akan pernah tumpang tindih.
+
+name: ihsg
+prefect-version: 3.9.1
+
+pull:
+  - prefect.deployments.steps.set_working_directory:
+      directory: /app/orchestration
+
+deployments:
+  - name: ihsg-daily-predict
+    description: >-
+      Ingest incremental, bangun silver & fitur, lalu ramalan 1..7 hari memakai
+      model champion. Berjalan setelah penutupan pasar AS (data EEM/DJI final)
+      dan sebelum pembukaan BEI.
+    entrypoint: flows/daily_predict.py:daily_pipeline
+    concurrency_limit: 1
+    work_pool:
+      name: ihsg-pool
+    schedules:
+      - slug: daily-0515-wib
+        cron: "15 5 * * 1-5"
+        timezone: Asia/Jakarta
+        active: true
+
+  - name: ihsg-weekly-retrain
+    description: >-
+      Latih ulang GRU dengan data terbaru, evaluasi pada validasi, dan promosikan
+      hanya bila QLIKE validasi membaik (champion-challenger). Keputusan tetap
+      dicatat walau kalah.
+    entrypoint: flows/weekly_retrain.py:weekly_pipeline
+    concurrency_limit: 1
+    work_pool:
+      name: ihsg-pool
+    schedules:
+      - slug: weekly-0600-wib
+        cron: "0 6 * * 6"
+        timezone: Asia/Jakarta
+        active: true
+
+  - name: ihsg-backfill
+    description: >-
+      Jalankan pipeline untuk rentang tanggal (manual). Dipakai untuk mengisi
+      riwayat retrain (>3x) dan untuk mereproduksi evaluasi.
+    entrypoint: flows/backfill.py:backfill_pipeline
+    concurrency_limit: 1
+    work_pool:
+      name: ihsg-pool
+    parameters:
+      start: null
+      end: null
+      retrain: true

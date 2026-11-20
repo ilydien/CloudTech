@@ -1,0 +1,19 @@
+.env
+state/
+data/
+outputs/
+garage/
+prefect/
+mlflow/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+*.ipynb_checkpoints/
+# Jangan pernah commit artefak data
+*.parquet
+*.orc
+*.pt
+*.joblib

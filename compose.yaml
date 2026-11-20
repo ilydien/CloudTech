@@ -1,0 +1,228 @@
+# =============================================================================
+# IHSG Forecasting Engine - Docker Compose (on-prem / uji coba)
+#
+# Prinsip: SATU image untuk semua peran. Yang berbeda hanya entrypoint dan
+# apakah service itu long-running atau one-shot.
+#
+#   docker compose up -d                                  # storage + prefect + API
+#   docker compose run --rm engine ingest --as-of auto    # one-shot
+#   docker compose --profile ui up -d dashboard
+#
+# Pemetaan ke Azure nanti (lihat README):
+#   garage          -> Azure Storage Account (Blob/ADLS Gen2)
+#   prefect-worker  -> Azure Container Apps Job (schedule)
+#   serving         -> Azure Functions (HTTP trigger, container)
+#   dashboard       -> Azure Container App
+# =============================================================================
+
+name: ihsg
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ihsg-engine:4.2.0
+  user: "1000:1000"
+  env_file:
+    - .env
+  environment:
+    TZ: Asia/Jakarta
+    # Determinisme numerik: satu thread BLAS, hash seed tetap.
+    OMP_NUM_THREADS: "1"
+    MKL_NUM_THREADS: "1"
+    OPENBLAS_NUM_THREADS: "1"
+    PYTHONHASHSEED: "0"
+    PYTHONPATH: /app
+  volumes:
+    - app-state:/app/state
+
+services:
+  # ---------------------------------------------------------------------------
+  # Medallion storage (S3-compatible, self-hosted)
+  # ---------------------------------------------------------------------------
+  garage:
+    image: docker.io/dxflrs/garage:v2.5.0
+    restart: unless-stopped
+    ports:
+      - "${GARAGE_CONN_HOST_PORT:-3900}:3900"
+      - "${GARAGE_ADMIN_HOST_PORT:-3903}:3903"
+    environment:
+      GARAGE_RPC_SECRET: "${GARAGE_RPC_SECRET}"
+      GARAGE_ADMIN_SECRET: "${GARAGE_ADMIN_SECRET}"
+      GARAGE_ADMIN_TOKEN: "${GARAGE_ADMIN_TOKEN}"
+      GARAGE_DEFAULT_ACCESS_KEY: "${GARAGE_DEFAULT_ACCESS_KEY}"
+      GARAGE_DEFAULT_SECRET_KEY: "${GARAGE_DEFAULT_SECRET_KEY}"
+    volumes:
+      - ./config/garage.toml:/etc/garage.toml:ro
+      - garage-meta:/var/lib/garage/meta
+      - garage-data:/var/lib/garage/data
+    # --single-node melewati langkah layout assign/apply sepenuhnya.
+    command: /garage server --single-node --default-access-key
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  garage-webui:
+    image: docker.io/khairul169/garage-webui:1.1.0
+    restart: unless-stopped
+    depends_on:
+      garage:
+        condition: service_healthy
+    ports:
+      - "${GARAGE_WEBUI_HOST_PORT:-3909}:3909"
+    environment:
+      API_BASE_URL: http://garage:3903
+      S3_ENDPOINT_URL: http://garage:3900
+      API_ADMIN_KEY: ${GARAGE_ADMIN_SECRET}
+
+  garage-init:
+    build:
+      context: ./config/garage-init
+    depends_on:
+      garage:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN}
+      GARAGE_DEFAULT_ACCESS_KEY: ${GARAGE_DEFAULT_ACCESS_KEY}
+      GARAGE_BUCKETS: ${GARAGE_BUCKETS:-bronze silver gold mlartifacts}
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Orkestrasi (Prefect 3, work pool bertipe process -> tanpa docker socket)
+  # ---------------------------------------------------------------------------
+  prefect-metadata:
+    image: docker.io/postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: prefect
+      POSTGRES_PASSWORD: prefect
+      POSTGRES_DB: prefect
+    volumes:
+      - prefect-meta:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prefect"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  prefect-server:
+    <<: *app
+    entrypoint: ["prefect", "server", "start", "--host", "0.0.0.0"]
+    restart: unless-stopped
+    depends_on:
+      prefect-metadata:
+        condition: service_healthy
+    ports:
+      - "${PREFECT_HOST_PORT:-4200}:4200"
+    environment:
+      TZ: Asia/Jakarta
+      PYTHONPATH: /app
+      PREFECT_HOME: /home/app/.prefect
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+      PREFECT_SERVER_UI_API_URL: ${PREFECT_SERVER_UI_API_URL:-http://127.0.0.1:4200/api}
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@prefect-metadata:5432/prefect
+    volumes:
+      - prefect-home:/home/app/.prefect
+    healthcheck:
+      test:
+        ["CMD", "python", "-c",
+         "import urllib.request as u; u.urlopen('http://127.0.0.1:4200/api/health', timeout=2)"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 60s
+
+  prefect-worker:
+    <<: *app
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      prefect work-pool create ihsg-pool --type process || true;
+      prefect --no-prompt deploy --all &&
+      exec prefect worker start --pool ihsg-pool
+    restart: on-failure
+    working_dir: /app/orchestration
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+      garage-init:
+        condition: service_completed_successfully
+    environment:
+      TZ: Asia/Jakarta
+      PYTHONPATH: /app
+      PREFECT_HOME: /home/app/.prefect
+      PREFECT_API_URL: ${PREFECT_API_URL:-http://prefect-server:4200/api}
+    volumes:
+      - prefect-home:/home/app/.prefect
+
+  # ---------------------------------------------------------------------------
+  # Aplikasi
+  # ---------------------------------------------------------------------------
+  engine:
+    <<: *app
+    profiles: ["run"]
+    depends_on:
+      garage-init:
+        condition: service_completed_successfully
+    # Tidak ada restart policy: ini batch job, bukan daemon.
+
+  serving:
+    <<: *app
+    entrypoint: ["uvicorn", "ihsg.serving.local:app", "--host", "0.0.0.0", "--port", "8080"]
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      garage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  dashboard:
+    <<: *app
+    profiles: ["ui"]
+    entrypoint:
+      ["streamlit", "run", "ihsg/dashboard/app.py",
+       "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"]
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    depends_on:
+      garage-init:
+        condition: service_completed_successfully
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.16.2
+    profiles: ["track"]
+    restart: unless-stopped
+    entrypoint: ["mlflow"]
+    command:
+      - "server"
+      - "--backend-store-uri"
+      - "sqlite:////mlflow/mlflow.db"
+      - "--artifacts-destination"
+      - "/mlflow/artifacts"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "5000"
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-data:/mlflow
+
+volumes:
+  app-state:
+  garage-meta:
+  garage-data:
+  prefect-meta:
+  prefect-home:
+  mlflow-data:

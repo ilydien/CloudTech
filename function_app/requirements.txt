@@ -1,0 +1,10 @@
+# Dependensi Azure Function (HTTP trigger yang hanya membaca Parquet).
+# torch, arch, prefect, dan streamlit TIDAK dibutuhkan di sini: inference
+# dilakukan oleh job predict, bukan saat request.
+azure-functions==1.21.3
+
+numpy==2.1.3
+pandas==2.2.3
+pyarrow==18.1.0
+scipy==1.14.1
+s3fs==2024.10.0
