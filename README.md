@@ -50,6 +50,37 @@ Detail perintah `az` ada di [bagian 9](#9-migrasi-ke-azure).
 | **`gold/candidates` sebagai sumber prediksi** | menghapus train/serve skew: yang dievaluasi = yang diprediksi. |
 | **Champion–challenger** | retrain tidak boleh otomatis menurunkan kualitas produksi. |
 | **`run_id` deterministik** | retry orkestrator tidak menghasilkan duplikat palsu. |
+| **MLflow bersifat deskriptif** | `gold/champion` tetap sumber kebenaran operasional; MLflow mati tidak menghentikan produksi. |
+
+### 1.5 Tracking & versioning (MLflow)
+
+MLflow 2.22 menempel di setiap `train`:
+
+| Yang dikirim | Isi |
+|---|---|
+| **Params** | 26 nilai: `window`, `horizons`, `seed`, `hidden`, `learning_rate`, `selected_model`, `tau`, `c_train`, batas split |
+| **Metrics** | 49 nilai: QLIKE val/uji tiap kandidat, QLIKE uji h=2..7, AUC/precision/recall rezim, R²_OS, p Clark–West |
+| **Tags** | `ihsg_run_id`, `as_of`, `data_fingerprint`, `config_hash`, `git_sha`, `trigger`, `selected_model`, `promoted` |
+| **Artifacts** | `model.pt`, `scaler.parquet`, `ridge.joblib` → `s3://mlartifacts/mlflow/<exp>/<run>/artifacts/` |
+| **Model registry** | `ihsg-champion` (+ alias `champion`) — hanya dibuat saat promosi |
+
+Aturan versi:
+
+- versi bertambah **hanya** ketika challenger dipromosikan,
+- melatih ulang `as_of` + konfigurasi yang sama adalah **no-op** (`run_id` deterministik) → tidak menambah versi,
+- `gold/champion` menyimpan `mlflow_run_id` dan `mlflow_version`, jadi model produksi bisa dilacak ke satu versi registry.
+
+```bash
+make mlflow       # http://localhost:5000  (sudah ikut `make up`)
+```
+
+Model versi champion bisa dimuat ulang dan mereproduksi ramalan produksi:
+
+```python
+import mlflow
+model = mlflow.pyfunc.load_model("models:/ihsg-champion@champion")
+model.predict(None)   # 7 baris varians + volatilitas, identik dengan gold/predictions
+```
 
 > Diagram dibuat dari sumber teks di `docs/architecture.dot` dan `docs/dataflow.dot`,
 > lalu dirender dengan Graphviz. Regenerate: `make diagram`.
@@ -65,7 +96,8 @@ Detail perintah `az` ada di [bagian 9](#9-migrasi-ke-azure).
 ├── requirements.txt              # versi di-pin (kecuali torch, dipasang di Dockerfile)
 ├── config/
 │   ├── garage.toml               # single node, replication 1
-│   └── garage-init/              # bootstrap bucket via Admin API v2 (idempoten)
+│   ├── garage-init/              # bootstrap bucket via Admin API v2 (idempoten)
+│   └── mlflow/                   # image MLflow + boto3 (artefak ke Garage)
 ├── ihsg/
 │   ├── config.py                 # Settings dari env + config_hash
 │   ├── instruments.py            # ticker ↔ key partisi
@@ -79,10 +111,12 @@ Detail perintah `az` ada di [bagian 9](#9-migrasi-ke-azure).
 │   ├── providers/                # yfinance (auto_adjust=False)
 │   ├── models/                   # baseline ekonometrik + GRU (torch)
 │   ├── pipelines/                # ingest, silver, features, train, predict
+│   ├── tracking.py               # integrasi MLflow (opsional, gagal-tidak-fatal)
+│   ├── champion_model.py         # resep champion sebagai model pyfunc
 │   ├── serving/                  # handler murni + FastAPI lokal
 │   └── dashboard/                # Streamlit
 ├── orchestration/
-│   ├── prefect.yaml              # 3 deployment (harian, retrain, backfill)
+│   ├── serve.py                  # 2 deployment + jadwal WIB (sumber kebenaran)
 │   └── flows/                    # flow tipis yang memanggil ihsg.pipelines
 ├── function_app/                 # Azure Function (HTTP trigger)
 ├── docs/
@@ -127,7 +161,7 @@ Setelah itu:
 | | `bronze/yf/actions/ticker=<K>/…` | append-only | dividen & split mentah |
 | | `bronze/yf/_manifest/ingest_date=<D>/` | append-only | baris per ticker: jumlah baris, rentang, fingerprint, versi yfinance |
 | **silver** | `silver/prices/ticker=<K>/` | ditimpa penuh (turunan) | dedup, tipe, `ret_cc_pct`, `park_var`, `source_ingest_date` |
-| | `silver/panel/` | ditimpa penuh | panel lebar pada kalender BEI + `ffill(limit=3)` + `is_filled_<K>` |
+| | `silver/panel/as_of=<D>/` | upsert per partisi | panel lebar pada sesi BEI + `ffill(limit=3)` + `is_filled_<K>` |
 | | `silver/_dq/as_of=<D>/` | ditimpa | hasil pemeriksaan kualitas (hard/soft/info) |
 | | `silver/_quarantine/as_of=<D>/` | ditimpa | baris yang dibuang + alasannya |
 | **gold** | `gold/features/as_of=<D>/` | ditimpa | matriks fitur ber-lag + target |
@@ -139,9 +173,10 @@ Setelah itu:
 | | `gold/regime_eval/as_of=<D>/` | ditimpa | klasifikasi periode uji (bahan dashboard) |
 | | `gold/vol_eval/as_of=<D>/` | ditimpa | varians aktual vs GRU/HAR/EWMA/hist |
 | | `gold/metrics/as_of=<D>/` | ditimpa | metrik panjang (model × metric × split) |
-| | `gold/run_log/as_of=<D>/` | ditimpa | riwayat run/retrain (**bukti retrain >3×**) |
+| | `gold/run_log/as_of=<D>/stage=<S>/run_id=<R>/` | upsert per entri | riwayat run/retrain (**bukti retrain >3×**) |
 | | `gold/champion/` | ditimpa bila promosi | model produksi saat ini (satu baris) |
 | **mlartifacts** | `mlartifacts/run_id=<R>/` | immutable per run | `model.pt`, `scaler.parquet`, `ridge.joblib` |
+| | `mlartifacts/mlflow/<exp>/<run>/` | dikelola MLflow | artefak run + bundel model registry |
 
 Tidak ada CSV. Tidak ada JSON sebagai media penyimpanan — JSON hanya muncul sebagai
 **response HTTP** di serving.
@@ -164,6 +199,7 @@ Detail kolom per tabel: [`docs/contracts.md`](docs/contracts.md).
 | `make run` | pipeline lengkap sekali jalan |
 | `make backfill START=… END=…` | pipeline per hari bursa (retrain ikut) |
 | `make retrain4` | 4 retrain pada 4 tanggal → memenuhi bonus “retrain > 3×” |
+| `make mlflow` | MLflow UI (http://localhost:5000) |
 | `make dash` | dashboard Streamlit |
 | `make test` / `make lint` | unit test / ruff |
 
@@ -174,13 +210,20 @@ Semua perintah mendukung `AS_OF=YYYY-MM-DD` atau `AS_OF=auto`
 
 ## 6. Otomatisasi & retrain
 
-Prefect 3, **work pool bertipe `process`** (tanpa `docker.sock`), tiga deployment:
+Prefect 3 dijalankan sebagai **satu container `prefect-serve`** yang mendaftarkan
+deployment sekaligus mengeksekusinya (tanpa work pool, tanpa `prefect deploy`,
+tanpa `docker.sock`). Jadwal didefinisikan di `orchestration/serve.py`:
 
 | Deployment | Cron (WIB) | Isi |
 |---|---|---|
 | `ihsg-daily-predict` | `15 5 * * 1-5` | ingest → silver → features → **train bila `gold/candidates` hari itu belum ada** → predict |
 | `ihsg-weekly-retrain` | `0 6 * * 6` | sama, dengan train eksplisit (gate promosi) |
-| `ihsg-backfill` | manual | rentang tanggal, `active: false` |
+| backfill | manual | `make backfill START=… END=…` |
+
+Terbukti berjalan: deployment terdaftar dengan `paused=false`, jadwal berikutnya
+22:15Z (= 05:15 WIB) dan 23:00Z Sabtu (= 06:00 WIB), serta satu run manual
+lewat `prefect deployment run` berakhir `COMPLETED` dan menulis
+`gold/run_log` dengan `trigger=schedule`.
 
 Kenapa job harian ikut melatih: `predict` membaca `gold/candidates` (ramalan h=1
 semua model), dan tabel itu dihasilkan oleh tahap train. Biayanya ±3 detik, dan
@@ -299,6 +342,7 @@ Data: 2.144 baris panel, 2.109 baris fitur × 43 fitur, `as_of = 2026-11-19`.
 | features | 3,4 s |
 | train (5 kandidat + evaluasi h=1..7) | 3,5 s |
 | predict | 3,3 s |
+| train + logging MLflow | +15 s (unggah artefak + registry) |
 
 QLIKE varians kumulatif pada **data uji**:
 
@@ -330,15 +374,14 @@ Temuan yang dilaporkan apa adanya:
    sepenuhnya setara** — ini perbaikan berikutnya yang paling berdampak.
 2. **`IDX_HOLIDAYS` masih kosong** di `.env.example` — wajib diisi dari kalender
    resmi BEI, kalau tidak `target_date` bisa jatuh di hari libur.
-3. **Jalur Prefect belum diuji end-to-end** (server, work pool, deploy). Logika
-   flow sudah teruji lewat CLI, tetapi `prefect deploy --all` belum dijalankan.
-4. **Dashboard dimatikan** (`profiles: ["ui"]`) sesuai keputusan scope: fokus ke
-   gold + retrain. Kode tetap ada untuk pekerjaan lanjutan.
-5. **Belum ada uji integrasi otomatis** (golden hash) di CI; verifikasi hash masih
+3. **Dashboard dimatikan** (profil `ui`). Kode tersedia dan pernah diuji render,
+   tetapi tidak termasuk lingkup saat ini.
+4. **Belum ada uji integrasi otomatis** (golden hash) di CI; verifikasi hash masih
    manual lewat `ihsg.cli verify`.
-6. **Multi-node Garage** (replication 2) belum dicoba.
-7. `requirements.txt` memuat `pytest`/`ruff` agar `make test` bisa jalan di image
+5. **Multi-node Garage** (replication 2) belum dicoba.
+6. `requirements.txt` memuat `pytest`/`ruff` agar `make test` bisa jalan di image
    tunggal — kompromi yang disengaja, bukan praktik produksi ideal.
+7. **Azure Function belum di-deploy**; baru padanan lokalnya (`serving`) yang hidup.
 
 ---
 

@@ -174,6 +174,7 @@ def run(
     settings: Settings,
     as_of: str | None = None,
     *,
+    trigger: str = "pipeline",
     sink: Sink | None = None,
 ) -> dict:
     settings.validate()
@@ -212,7 +213,7 @@ def run(
         raise RuntimeError(f"data IHSG ({INDEX_KEY}) tidak tersedia di bronze; jalankan ingest dulu")
 
     panel = _build_panel(frames, settings, as_of)
-    sink.write_parquet(panel, f"{dataset.SILVER_PANEL}/{dataset.PART_FILE}", overwrite=True)
+    sink.write_parquet(panel, dataset.as_of_key(dataset.SILVER_PANEL, as_of), overwrite=True)
 
     non_empty = [frame for frame in quarantines if frame is not None and not frame.empty]
     quarantine = pd.concat(non_empty, ignore_index=True) if non_empty else pd.DataFrame()
@@ -226,7 +227,7 @@ def run(
         as_of=as_of,
         run_id=f"silver-{panel_fingerprint[:12]}",
         stage="silver",
-        trigger="pipeline",
+        trigger=trigger,
         status="ok",
         duration_s=duration,
         data_fingerprint=panel_fingerprint,

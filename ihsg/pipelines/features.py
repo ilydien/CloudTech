@@ -151,7 +151,7 @@ def run(
     sink = sink or get_sink(settings)
     as_of = as_of or settings.as_of or dataset.resolve_as_of(settings)
 
-    panel = sink.read_parquet(f"{dataset.SILVER_PANEL}/{dataset.PART_FILE}")
+    panel = sink.read_parquet(dataset.as_of_key(dataset.SILVER_PANEL, as_of))
     frame, meta = build_frame(panel, settings, as_of)
     validate_contract(frame, GOLD_FEATURES)
 

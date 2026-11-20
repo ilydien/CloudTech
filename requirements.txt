@@ -32,6 +32,10 @@ prefect==3.9.1
 # Prefect dengan backend Postgres (PREFECT_API_DATABASE_CONNECTION_URL)
 asyncpg==0.30.0
 
+# tracking & model registry (opsional saat runtime: tanpa MLFLOW_TRACKING_URI
+# pipeline tetap jalan, hanya tanpa pencatatan)
+mlflow==2.22.0
+
 # serving + dashboard
 # fastapi di-pin ke rentang yang dibutuhkan prefect 3.9.1 (>=0.139,<0.151)
 fastapi==0.149.0

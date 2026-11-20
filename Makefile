@@ -12,7 +12,7 @@ END     ?=
 COMPOSE_RUN := $(COMPOSE) --profile run run --rm engine
 
 .DEFAULT_GOAL := help
-.PHONY: help up down ps logs doctor ingest silver features train predict run backfill retrain4 serve dash test lint fmt clean shell diagram
+.PHONY: help up down ps logs doctor ingest silver features train predict run backfill retrain4 serve mlflow dash test lint fmt clean shell diagram
 
 help:  ## Tampilkan daftar target
 	@grep -E '^[a-zA-Z0-9_]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -30,7 +30,7 @@ logs:  ## Ikuti log semua service
 	$(COMPOSE) logs -f --tail=100
 
 down:  ## Hentikan semua service (volume tetap)
-	$(COMPOSE) --profile ui --profile run --profile track down
+	$(COMPOSE) --profile ui --profile run down
 
 doctor:  ## Cek konektivitas storage & konfigurasi
 	$(COMPOSE_RUN) doctor
@@ -67,6 +67,10 @@ retrain4:  ## Bukti bonus: 4 retrain pada 4 tanggal berbeda (idempoten per tangg
 serve:  ## Nyalakan API lokal
 	$(COMPOSE) up -d serving
 
+mlflow:  ## Buka MLflow UI (http://localhost:5000)
+	$(COMPOSE) up -d mlflow
+	@echo "MLflow: http://localhost:5000"
+
 dash:  ## Nyalakan dashboard Streamlit
 	$(COMPOSE) --profile ui up -d dashboard
 	@echo "Dashboard: http://localhost:8501"
@@ -93,4 +97,4 @@ diagram:  ## Render docs/*.dot menjadi PNG + SVG (butuh Docker, tanpa install lo
 	@echo "selesai: docs/architecture.{png,svg}, docs/dataflow.{png,svg}"
 
 clean:  ## Hapus container + volume (data hilang!)
-	$(COMPOSE) --profile ui --profile run --profile track down -v
+	$(COMPOSE) --profile ui --profile run down -v

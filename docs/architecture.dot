@@ -71,7 +71,7 @@ digraph architecture {
     dash [label="dashboard   :8501\nStreamlit  (profile ui — dimatikan)", style="rounded,filled,dashed", fillcolor="#f4f4f4", color="#9aa7b4"];
 
     subgraph cluster_orch {
-      label="  Orkestrasi (Prefect 3)  ";
+      label="  Orkestrasi & tracking (Prefect 3 + MLflow 2.22)  ";
       style="rounded,dashed";
       color="#8fa8c8";
       fontcolor="#3c5a7a";
@@ -79,6 +79,7 @@ digraph architecture {
       pw   [label="worker\nwork pool: process"];
       psrv [label="server\n:4200"];
       pg   [label="metadata\nPostgres 17"];
+      mlf  [label="mlflow\n:5000\ntracking + registry", fillcolor="#efe8f8", color="#7b5ea7"];
     }
   }
 
@@ -87,6 +88,7 @@ digraph architecture {
   /* ---------------- aliran ---------------- */
   yahoo -> engine [label="HTTPS\n(OHLCV + actions)"];
   pw -> engine [label="memicu flow", constraint=false];
+  engine -> mlf [label="log run & registry", constraint=false, color="#7b5ea7"];
   psrv -> pg [dir=both, label="baca/tulis", constraint=false];
   pw -> psrv [dir=back, label="API", constraint=false];
 

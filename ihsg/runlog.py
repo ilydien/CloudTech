@@ -1,11 +1,12 @@
 """Riwayat run per tahap -> ``gold/run_log``.
 
-Satu tabel per ``as_of`` (append + dedupe). Ini sumber bukti bahwa pipeline
-benar-benar berjalan otomatis: setiap tahap meninggalkan jejak, bukan hanya
-training.
+Desain: **satu baris = satu file**, dengan kunci
+``gold/run_log/as_of=<D>/stage=<S>/run_id=<R>/data.parquet``.
 
-Kenapa bukan UI orkestrator: bukti harus berupa **data** (Parquet) yang bisa
-dilampirkan di laporan, bukan screenshot yang bergantung pada server Prefect.
+Kenapa tidak satu file per ``as_of`` (baca-ubah-tulis): pola itu rawan
+*lost update* bila dua tahap menulis bersamaan (baca daftar lama, gabung, tulis).
+Dengan satu file per entri, penulisan menjadi **upsert murni**: menulis ulang
+kunci yang sama = idempoten, dan tidak pernah menyentuh baris lain.
 """
 
 from __future__ import annotations
@@ -30,6 +31,13 @@ def git_sha() -> str:
         ).strip()
     except Exception:  # noqa: BLE001
         return "unknown"
+
+
+def run_key(as_of: str, stage: str, run_id: str) -> str:
+    return (
+        f"{dataset.GOLD_RUN_LOG}/as_of={as_of}/stage={stage}"
+        f"/run_id={run_id}/{dataset.PART_FILE}"
+    )
 
 
 def append_run(
@@ -68,9 +76,30 @@ def append_run(
     )
     validate_contract(row, GOLD_RUN_LOG)
 
-    key = dataset.as_of_key(dataset.GOLD_RUN_LOG, as_of)
-    existing = sink.try_read_parquet(key)
-    combined = row if existing is None else pd.concat([existing, row], ignore_index=True)
-    combined = combined.drop_duplicates(subset=["as_of", "stage", "run_id"], keep="last")
-    sink.write_parquet(combined, key, overwrite=True)
+    key = run_key(as_of, stage, run_id)
+    sink.write_parquet(row, key, overwrite=True)
     return key
+
+
+def read_runs(sink: Sink, as_of: str | None = None) -> pd.DataFrame:
+    """Baca seluruh riwayat (atau satu ``as_of``), satu baris per run."""
+    keys = sink.list_keys(f"{dataset.GOLD_RUN_LOG}/")
+    if as_of is not None:
+        keys = [key for key in keys if f"as_of={as_of}/" in key]
+    # Urutkan agar format lama (as_of=<D>/data.parquet) terbaca lebih dulu,
+    # sehingga dedupe keep="last" memilih baris format baru.
+    keys = sorted(keys)
+
+    frames: list[pd.DataFrame] = []
+    for key in keys:
+        try:
+            frames.append(sink.read_parquet(key))
+        except Exception:  # noqa: BLE001 - file rusak tidak boleh mematikan laporan
+            continue
+
+    if not frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.drop_duplicates(subset=["as_of", "stage", "run_id"], keep="last")
+    return combined.sort_values(["as_of", "stage", "run_id"]).reset_index(drop=True)

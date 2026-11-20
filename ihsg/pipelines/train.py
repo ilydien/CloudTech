@@ -31,7 +31,8 @@ from ihsg import dataset, eval as metrics
 from ihsg.config import JAKARTA_TZ, Settings
 from ihsg.models import baselines, seq
 from ihsg.pipelines.features import TARGET_COLUMNS
-from ihsg.runlog import append_run
+from ihsg.runlog import append_run, git_sha
+from ihsg import tracking
 from ihsg.schemas import (
     GOLD_CANDIDATES,
     GOLD_CHAMPION,
@@ -476,7 +477,19 @@ def run(
         if champion_frame is not None and not champion_frame.empty
         else float("inf")
     )
-    promoted = bool(np.isfinite(selected_qlike) and selected_qlike <= previous_qlike)
+    previous_run_id = (
+        str(champion_frame["run_id"].iloc[0])
+        if champion_frame is not None and not champion_frame.empty
+        else None
+    )
+    # Promosi hanya bila modelnya BERBEDA dan tidak lebih buruk. run_id
+    # deterministik, jadi melatih ulang as_of+config yang sama adalah no-op:
+    # tidak menambah versi registry, tidak mengubah champion.
+    promoted = bool(
+        np.isfinite(selected_qlike)
+        and selected_qlike <= previous_qlike
+        and previous_run_id != run_id
+    )
 
     # --- evaluasi untuk dashboard -----------------------------------------
     test_ends = ends[test_mask]
@@ -505,21 +518,28 @@ def run(
     regime = metrics.regime_metrics(regime_eval["actual_high"], regime_eval["prob_high"])
 
     # --- tulis artefak -----------------------------------------------------
-    sink.write_bytes(
-        seq.dumps(model, config, settings.window, len(feature_names), feature_names),
-        dataset.artifact_key(run_id, "model.pt"),
-        overwrite=True,
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    model_blob = seq.dumps(model, config, settings.window, len(feature_names), feature_names)
+    scaler_frame = pd.DataFrame({"feature": feature_names, "mean": mean, "scale": scale})
+    scaler_buffer = io.BytesIO()
+    pq.write_table(
+        pa.Table.from_pandas(scaler_frame.reset_index(drop=True), preserve_index=False),
+        scaler_buffer,
     )
-    sink.write_parquet(
-        pd.DataFrame({"feature": feature_names, "mean": mean, "scale": scale}),
-        dataset.artifact_key(run_id, "scaler.parquet"),
-        overwrite=True,
-    )
-    buffer = io.BytesIO()
+    ridge_buffer = io.BytesIO()
     import joblib
 
-    joblib.dump({"model": ridge, "features": feature_names}, buffer)
-    sink.write_bytes(buffer.getvalue(), dataset.artifact_key(run_id, "ridge.joblib"), overwrite=True)
+    joblib.dump({"model": ridge, "features": feature_names}, ridge_buffer)
+
+    artifacts = {
+        "model.pt": model_blob,
+        "scaler.parquet": scaler_buffer.getvalue(),
+        "ridge.joblib": ridge_buffer.getvalue(),
+    }
+    for name, blob in artifacts.items():
+        sink.write_bytes(blob, dataset.artifact_key(run_id, name), overwrite=True)
 
     metrics_frame = pd.DataFrame(metric_rows)
     validate_contract(metrics_frame, GOLD_METRICS)
@@ -547,6 +567,68 @@ def run(
         config_hash=config_hash,
     )
 
+
+    # --- pencatatan MLflow (opsional, tidak boleh menggagalkan training) ----
+    selected_row = candidates[candidates["model"] == selected_model].iloc[0]
+    ml_metrics: dict[str, float | None] = {}
+    for row in candidates_rows:
+        ml_metrics[f"val_qlike_{row['model']}"] = row["val_qlike"]
+        ml_metrics[f"test_qlike_{row['model']}"] = row["test_qlike"]
+    for row in metric_rows:
+        if row["split"] == "test" and row["horizon"] > 1 and row["metric"] == "qlike":
+            ml_metrics[f"test_qlike_{row['model']}_h{row['horizon']}"] = row["value"]
+    ml_metrics.update({
+        "regime_auc": regime["auc"],
+        "regime_precision": regime["precision"],
+        "regime_recall": regime["recall"],
+        "regime_f1": regime["f1"],
+        "regime_base_rate": regime["base_rate"],
+        "val_r2_oos": val_r2,
+        "test_r2_oos": test_r2,
+        "val_clark_west_p": val_cw_p,
+        "test_clark_west_p": test_cw_p,
+    })
+
+    tracking_info = tracking.log_training_run(
+        as_of=as_of,
+        run_id=run_id,
+        trigger=trigger,
+        selected_model=selected_model,
+        promoted=promoted,
+        params={
+            **settings.model_config(),
+            "n_features": len(feature_names),
+            "selected_model": selected_model,
+            "ml_return_enabled": ml_return_enabled,
+            "train_days": i_tr,
+            "val_days": i_va - i_tr,
+            "test_days": n_real - i_va,
+            "tau": tau,
+            "c_train": c_train,
+        },
+        metrics=ml_metrics,
+        tags={
+            "ihsg_run_id": run_id,
+            "as_of": as_of,
+            "data_fingerprint": data_fingerprint,
+            "config_hash": config_hash,
+            "git_sha": git_sha(),
+        },
+        artifacts=artifacts,
+        recipe={
+            "model": selected_model,
+            "as_of": as_of,
+            "run_id": run_id,
+            "horizons": int(settings.horizons),
+            "h1_var": float(selected_row["h1_var"]),
+            "uncond": float(selected_row["uncond"]),
+            "persistence": float(selected_row["persistence"]),
+            "tau": tau,
+            "prob_high": prob_next,
+        } if promoted else None,
+    )
+
+    # --- champion (ditulis setelah tracking agar versi registry ikut tercatat)
     if promoted:
         champion = pd.DataFrame([{
             "run_id": run_id,
@@ -565,6 +647,8 @@ def run(
             "n_features": int(len(feature_names)),
             "config_hash": config_hash,
             "data_fingerprint": data_fingerprint,
+            "mlflow_run_id": str(tracking_info.get("mlflow_run_id") or ""),
+            "mlflow_version": str(tracking_info.get("model_version") or ""),
         }])
         validate_contract(champion, GOLD_CHAMPION)
         sink.write_parquet(champion, dataset.GOLD_CHAMPION, overwrite=True)
@@ -595,4 +679,5 @@ def run(
         "duration_s": round(duration, 1),
         "finished_at": datetime.now(ZoneInfo(JAKARTA_TZ)).isoformat(timespec="seconds"),
         "features_fingerprint": fingerprint(frame),
+        "tracking": tracking_info,
     }

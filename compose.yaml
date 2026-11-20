@@ -33,6 +33,15 @@ x-app: &app
     OPENBLAS_NUM_THREADS: "1"
     PYTHONHASHSEED: "0"
     PYTHONPATH: /app
+    # Tracking MLflow. Bila server tidak tersedia, train tetap jalan (hanya
+    # tanpa pencatatan) - lihat ihsg/tracking.py.
+    PREFECT_API_URL: ${PREFECT_API_URL:-http://prefect-server:4200/api}
+    PREFECT_HOME: /home/app/.prefect
+    MLFLOW_TRACKING_URI: ${MLFLOW_TRACKING_URI:-http://mlflow:5000}
+    MLFLOW_S3_ENDPOINT_URL: http://garage:3900
+    MLFLOW_S3_IGNORE_TLS: "true"
+    AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+    AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
   volumes:
     - app-state:/app/state
 
@@ -137,25 +146,16 @@ services:
       retries: 12
       start_period: 60s
 
-  prefect-worker:
+  prefect-serve:
     <<: *app
-    entrypoint: ["/bin/sh", "-c"]
-    command: >
-      prefect work-pool create ihsg-pool --type process || true;
-      prefect --no-prompt deploy --all &&
-      exec prefect worker start --pool ihsg-pool
-    restart: on-failure
+    entrypoint: ["python", "serve.py"]
+    restart: unless-stopped
     working_dir: /app/orchestration
     depends_on:
       prefect-server:
         condition: service_healthy
       garage-init:
         condition: service_completed_successfully
-    environment:
-      TZ: Asia/Jakarta
-      PYTHONPATH: /app
-      PREFECT_HOME: /home/app/.prefect
-      PREFECT_API_URL: ${PREFECT_API_URL:-http://prefect-server:4200/api}
     volumes:
       - prefect-home:/home/app/.prefect
 
@@ -200,24 +200,41 @@ services:
         condition: service_completed_successfully
 
   mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.16.2
-    profiles: ["track"]
+    build:
+      context: ./config/mlflow
+    image: ihsg-mlflow:2.22.0
     restart: unless-stopped
+    depends_on:
+      garage:
+        condition: service_healthy
     entrypoint: ["mlflow"]
     command:
       - "server"
       - "--backend-store-uri"
       - "sqlite:////mlflow/mlflow.db"
       - "--artifacts-destination"
-      - "/mlflow/artifacts"
+      - "s3://mlartifacts/mlflow"
       - "--host"
       - "0.0.0.0"
       - "--port"
       - "5000"
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://garage:3900
+      MLFLOW_S3_IGNORE_TLS: "true"
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
     ports:
-      - "5000:5000"
+      - "${MLFLOW_HOST_PORT:-5000}:5000"
     volumes:
       - mlflow-data:/mlflow
+    healthcheck:
+      test:
+        ["CMD", "python", "-c",
+         "import urllib.request as u; u.urlopen('http://127.0.0.1:5000/health', timeout=2)"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
 
 volumes:
   app-state:

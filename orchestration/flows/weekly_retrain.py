@@ -25,7 +25,7 @@ def weekly_pipeline(as_of: str | None = None) -> dict:
 
     ingest_result = ingest_pipeline.run(settings, as_of)
     resolved = ingest_result["as_of"]
-    silver_pipeline.run(settings, resolved)
+    silver_pipeline.run(settings, resolved, trigger="schedule")
     features_pipeline.run(settings, resolved)
 
     train_result = train_pipeline.run(settings, resolved, trigger="schedule")

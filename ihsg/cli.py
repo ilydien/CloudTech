@@ -101,7 +101,7 @@ def cmd_run(args: argparse.Namespace) -> dict:
 
     stages: list[dict] = [
         ingest_result,
-        silver_pipeline.run(settings, as_of),
+        silver_pipeline.run(settings, as_of, trigger=args.trigger),
         features_pipeline.run(settings, as_of),
     ]
     if needs_training:
@@ -167,15 +167,14 @@ def cmd_verify(args: argparse.Namespace) -> dict:
 
 def cmd_report(args: argparse.Namespace) -> dict:
     settings = _settings(args)
+    from ihsg.runlog import read_runs
+
     sink = get_sink(settings)
-    frames = []
-    for as_of in dataset.existing_as_of(sink, dataset.GOLD_RUN_LOG):
-        frames.append(sink.read_parquet(dataset.as_of_key(dataset.GOLD_RUN_LOG, as_of)))
-    if not frames:
+    table = read_runs(sink)
+    if table.empty:
         print("belum ada run tercatat")
         return {"stage": "report", "runs": 0}
-    table = pd.concat(frames, ignore_index=True).sort_values("as_of")
-    columns = ["as_of", "run_id", "trigger", "promoted", "val_metric", "test_metric", "duration_s"]
+    columns = ["as_of", "stage", "run_id", "trigger", "promoted", "val_metric", "duration_s"]
     print(table[columns].to_string(index=False))
     return {"stage": "report", "runs": int(len(table))}
 

@@ -6,7 +6,7 @@ Semua path relatif terhadap satu namespace key (lihat ``ihsg.storage``):
     bronze/yf/actions/ticker=JKSE/ingest_date=2026-11-13/data.parquet
     bronze/yf/_manifest/ingest_date=2026-11-13/data.parquet
     silver/prices/ticker=JKSE/data.parquet
-    silver/panel/data.parquet
+    silver/panel/as_of=2026-11-13/data.parquet
     silver/_dq/as_of=2026-11-13/data.parquet
     silver/_quarantine/as_of=2026-11-13/data.parquet
     gold/features/as_of=2026-11-13/data.parquet
@@ -15,7 +15,7 @@ Semua path relatif terhadap satu namespace key (lihat ``ihsg.storage``):
     gold/regime_eval/as_of=2026-11-13/data.parquet
     gold/vol_eval/as_of=2026-11-13/data.parquet
     gold/metrics/as_of=2026-11-13/data.parquet
-    gold/run_log/as_of=2026-11-13/data.parquet
+    gold/run_log/as_of=2026-11-13/stage=train/run_id=<id>/data.parquet
     gold/params/as_of=2026-11-13/data.parquet
     gold/champion/data.parquet
     mlartifacts/run_id=<id>/model.pt

@@ -17,3 +17,5 @@ venv/
 *.orc
 *.pt
 *.joblib
+# artefak browser automation
+.playwright-mcp/

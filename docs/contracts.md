@@ -74,7 +74,7 @@ Kunci natural: `(Date)`.
 
 Kunci natural: `(ticker, date)`.
 
-### `silver/panel/data.parquet`
+### `silver/panel/as_of=<D>/data.parquet`
 
 Panel lebar pada kalender bursa BEI. Untuk setiap instrumen `K`:
 
@@ -236,11 +236,11 @@ Format panjang:
 `metric` ∈ `qlike`, `rmse_vol` (h=1..7), `dm_p_vs_har` (h=1..7), `dm_p_vs_garch`,
 `r2_oos` (model `ridge`). Kunci: `(as_of, run_id, split, model, metric, horizon)`.
 
-### `gold/run_log/as_of=<D>/data.parquet`
+### `gold/run_log/as_of=<D>/stage=<S>/run_id=<R>/data.parquet`
 
 | Kolom | Keterangan |
 |---|---|
-| `as_of`, `stage`, `run_id` | kunci; `stage` ∈ `silver`, `train`, `predict` |
+| `as_of`, `stage`, `run_id` | kunci; `stage` ∈ `silver`, `train`, `predict`. Satu entri = satu file, sehingga penulisan bersifat *upsert* tanpa baca-ubah-tulis |
 | `trigger` | `manual` / `schedule` / `backfill` / `api` |
 | `status` | `ok` / `failed` |
 | `promoted` | apakah kandidat terbaik menggantikan champion |
@@ -253,7 +253,10 @@ Format panjang:
 Satu baris: `run_id`, `trained_as_of`, `model_vol`, `model_ret`, `val_qlike`,
 `val_r2_oos`, `ml_return_enabled`, `tau`, `c_train`, `long_run_var_pct2`,
 `persistence`, `window`, `horizons`, `n_features`, `config_hash`,
-`data_fingerprint`.
+`data_fingerprint`, `mlflow_run_id`, `mlflow_version`.
+
+Dua kolom terakhir menautkan champion ke satu versi di MLflow Model Registry
+(kosong bila tracking dimatikan).
 
 ---
 
@@ -264,6 +267,7 @@ Satu baris: `run_id`, `trained_as_of`, `model_vol`, `model_ret`, `val_qlike`,
 | `mlartifacts/run_id=<R>/model.pt` | `state_dict` GRU + konfigurasi + daftar fitur |
 | `mlartifacts/run_id=<R>/scaler.parquet` | `feature`, `mean`, `scale` (urutan fitur ikut tersimpan) |
 | `mlartifacts/run_id=<R>/ridge.joblib` | model return + daftar fitur |
+| `mlartifacts/mlflow/<exp>/<run>/` | artefak run MLflow + bundel model registry |
 
 `model.pt` hanya bisa dibuka dengan versi `torch`/`numpy` yang sama seperti di
 `requirements.txt`. Naikkan versi → wajib retrain (`git_sha` + `config_hash`

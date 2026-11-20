@@ -56,12 +56,9 @@ def _load(as_of: str) -> dict[str, pd.DataFrame]:
 
 @st.cache_data(ttl=60)
 def _run_log() -> pd.DataFrame:
-    sink = _sink()
-    frames = [
-        sink.read_parquet(dataset.as_of_key(dataset.GOLD_RUN_LOG, as_of))
-        for as_of in dataset.existing_as_of(sink, dataset.GOLD_RUN_LOG)
-    ]
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    from ihsg.runlog import read_runs
+
+    return read_runs(_sink())
 
 
 st.title("IHSG - Volatilitas & Return (hasil model)")
@@ -176,12 +173,11 @@ if runs.empty:
 else:
     st.dataframe(
         runs.sort_values("as_of", ascending=False)[
-            ["as_of", "run_id", "trigger", "promoted", "val_metric", "test_metric", "duration_s", "git_sha"]
+            ["as_of", "stage", "trigger", "promoted", "duration_s", "git_sha"]
         ].rename(columns={
-            "as_of": "As of", "run_id": "Run", "trigger": "Trigger", "promoted": "Dipromosikan",
-            "val_metric": "QLIKE val", "test_metric": "QLIKE test",
-            "duration_s": "Durasi (s)", "git_sha": "Git",
-        }),
+            "as_of": "As of", "stage": "Tahap", "trigger": "Trigger",
+            "promoted": "Dipromosikan", "duration_s": "Durasi (s)", "git_sha": "Git",
+        }).head(12),
         use_container_width=True,
         hide_index=True,
     )

@@ -386,6 +386,8 @@ GOLD_CHAMPION = Contract(
         "n_features": "int",
         "config_hash": "str",
         "data_fingerprint": "str",
+        "mlflow_run_id": "str",
+        "mlflow_version": "str",
     },
     keys=("run_id",),
     not_null=("run_id",),

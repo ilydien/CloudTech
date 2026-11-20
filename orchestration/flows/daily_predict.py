@@ -29,7 +29,7 @@ def daily_pipeline(as_of: str | None = None) -> dict:
     resolved = ingest_result["as_of"]
     logger.info("ingest: %s (%s)", ingest_result["status"], resolved)
 
-    silver_result = silver_pipeline.run(settings, resolved)
+    silver_result = silver_pipeline.run(settings, resolved, trigger="schedule")
     logger.info("silver: %s baris, %s DQ gagal", silver_result["rows"], silver_result["dq_failed"])
 
     features_result = features_pipeline.run(settings, resolved)

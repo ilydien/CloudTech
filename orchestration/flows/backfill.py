@@ -39,7 +39,7 @@ def backfill_pipeline(
             ingest_result = ingest_pipeline.run(settings, as_of)
             resolved = ingest_result["as_of"]
             record["as_of"] = resolved
-            silver_pipeline.run(settings, resolved)
+            silver_pipeline.run(settings, resolved, trigger="backfill")
             features_pipeline.run(settings, resolved)
             if retrain:
                 record["train"] = train_pipeline.run(settings, resolved, trigger="backfill")
