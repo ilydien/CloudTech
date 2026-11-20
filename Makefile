@@ -12,7 +12,7 @@ END     ?=
 COMPOSE_RUN := $(COMPOSE) --profile run run --rm engine
 
 .DEFAULT_GOAL := help
-.PHONY: help up down ps logs doctor ingest silver features train predict run backfill retrain4 serve dash test lint fmt clean shell
+.PHONY: help up down ps logs doctor ingest silver features train predict run backfill retrain4 serve dash test lint fmt clean shell diagram
 
 help:  ## Tampilkan daftar target
 	@grep -E '^[a-zA-Z0-9_]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -82,6 +82,15 @@ fmt:  ## Ruff format
 
 shell:  ## Shell interaktif di image engine
 	$(COMPOSE) run --rm --no-deps --entrypoint bash engine
+
+diagram:  ## Render docs/*.dot menjadi PNG + SVG (butuh Docker, tanpa install lokal)
+	docker run --rm -v "$(CURDIR)/docs:/w" -w /w python:3.11-slim sh -c \
+		"apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq graphviz fonts-dejavu-core >/dev/null 2>&1 && \
+		 dot -Tpng -Gdpi=110 architecture.dot -o architecture.png && \
+		 dot -Tsvg architecture.dot -o architecture.svg && \
+		 dot -Tpng -Gdpi=110 dataflow.dot -o dataflow.png && \
+		 dot -Tsvg dataflow.dot -o dataflow.svg"
+	@echo "selesai: docs/architecture.{png,svg}, docs/dataflow.{png,svg}"
 
 clean:  ## Hapus container + volume (data hilang!)
 	$(COMPOSE) --profile ui --profile run --profile track down -v

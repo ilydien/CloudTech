@@ -12,43 +12,47 @@ Azure Function.
 
 ## 1. Arsitektur
 
-```
-                 ┌──────────────────────────── Prefect (4200) ───────────────────────────┐
-                 │  ihsg-daily-predict   05:15 WIB, Sen-Jum                               │
-                 │  ihsg-weekly-retrain  06:00 WIB, Sabtu                                 │
-                 │  ihsg-backfill        manual (concurrency_limit = 1)                   │
-                 └───────────────────────────────┬────────────────────────────────────────┘
-                                                 │ memanggil
-                                                 ▼
-        ┌──────────────────────────── engine (satu image) ─────────────────────────────┐
-        │  ingest → silver → features → [train] → predict                              │
-        └───────┬──────────────────────────────────────────────────────────────────────┘
-                │ Parquet (tidak ada CSV/JSON sebagai media penyimpanan)
-                ▼
-        ┌──────────────────────── Garage S3 (3900 / UI 3909) ──────────────────────────┐
-        │  bronze/   append-only, mentah, per ingest_date                              │
-        │  silver/   bersih + panel sejajar kalender BEI + _dq + _quarantine            │
-        │  gold/     features, predictions, regime, metrics, run_log, champion          │
-        │  mlartifacts/  model.pt, scaler.parquet, ridge.joblib                         │
-        └───────┬──────────────────────────────────────────────────────────────────────┘
-                │ dibaca (tanpa inference ulang)
-                ▼
-   ┌─────────────────────────┐        ┌──────────────────────────────┐
-   │ serving (FastAPI 8080)  │        │ dashboard (Streamlit 8501)   │
-   │ = handler Azure Function│        │ hasil ML: ramalan, rezim,     │
-   │   GET /forecast         │        │ riwayat retrain               │
-   └─────────────────────────┘        └──────────────────────────────┘
-```
+### 1.1 Deployment — on-prem (Docker Compose)
 
-Poin desain yang menentukan:
+![Arsitektur deployment IHSG Forecasting Engine](docs/architecture.png)
+
+*Gambar 1.* Satu image dipakai untuk semua peran (batch, Prefect, serving,
+dashboard). Garage menyimpan keempat layer medallion; `serving` hanya membaca
+`gold`. Versi vektor untuk laporan: [`docs/architecture.svg`](docs/architecture.svg).
+
+### 1.2 Alur data — medallion per tahap
+
+![Alur data medallion](docs/dataflow.png)
+
+*Gambar 2.* Batas tiap tahap beserta waktu nyata dan tabel yang dihasilkan.
+Perhatikan bahwa `gold/candidates` menjadi satu-satunya sumber `predict`, sehingga
+prediksi tidak bisa menyimpang dari hasil evaluasi.
+Versi vektor: [`docs/dataflow.svg`](docs/dataflow.svg).
+
+### 1.3 Pemetaan ke Azure
+
+| Docker (sekarang) | Azure (nanti) | Perubahan kode |
+|---|---|---|
+| `garage` | Storage Account (Blob / ADLS Gen2) | implementasi `Sink` baru |
+| `engine` + `prefect-worker` | Container Apps Job (timer trigger) | nol — image sama |
+| `serving` | Azure Function (HTTP) | `function_app/` sudah ada |
+| `dashboard` | Container App (min replica 0) | nol |
+
+Detail perintah `az` ada di [bagian 9](#9-migrasi-ke-azure).
+
+### 1.4 Poin desain yang menentukan
 
 | Keputusan | Alasan |
 |---|---|
 | **Satu image** untuk engine, Prefect, serving, dashboard | satu versi library = satu perilaku. Image yang sama dipakai ulang di Azure. |
 | **Handler serving murni** (`ihsg/serving/handler.py`) | FastAPI lokal dan Azure Function memanggil fungsi yang sama → tidak mungkin berbeda. |
-| **Inference di job, bukan di request** | request hanya membaca Parquet (cepat, murah, deterministik). `LIVE_INFERENCE=1` disediakan bila dosen meminta inference saat request. |
+| **Inference di job, bukan di request** | request hanya membaca Parquet (cepat, murah, deterministik). Model artifact tetap disimpan untuk audit. |
+| **`gold/candidates` sebagai sumber prediksi** | menghapus train/serve skew: yang dievaluasi = yang diprediksi. |
 | **Champion–challenger** | retrain tidak boleh otomatis menurunkan kualitas produksi. |
-| **`run_id` deterministik** | retry Prefect/orchestrator tidak menghasilkan duplikat palsu. |
+| **`run_id` deterministik** | retry orkestrator tidak menghasilkan duplikat palsu. |
+
+> Diagram dibuat dari sumber teks di `docs/architecture.dot` dan `docs/dataflow.dot`,
+> lalu dirender dengan Graphviz. Regenerate: `make diagram`.
 
 ---
 
@@ -81,8 +85,11 @@ Poin desain yang menentukan:
 │   ├── prefect.yaml              # 3 deployment (harian, retrain, backfill)
 │   └── flows/                    # flow tipis yang memanggil ihsg.pipelines
 ├── function_app/                 # Azure Function (HTTP trigger)
-├── tests/                        # unit test tanpa jaringan/Docker
-└── docs/contracts.md             # spesifikasi tiap tabel (bahan Bab 2/3)
+├── docs/
+│   ├── contracts.md              # spesifikasi tiap tabel (bahan Bab 2/3)
+│   ├── architecture.dot|png|svg  # diagram deployment (sumber + hasil render)
+│   └── dataflow.dot|png|svg      # diagram medallion per tahap
+└── tests/                        # unit test tanpa jaringan/Docker
 ```
 
 ---

@@ -1,0 +1,102 @@
+/*
+ * Arsitektur deployment IHSG Forecasting Engine (on-prem / Docker Compose).
+ * Target Azure sengaja TIDAK digambar di sini - lihat tabel migrasi di README
+ * agar diagram tetap terbaca.
+ *
+ * Render:
+ *   dot -Tpng -Gdpi=110 docs/architecture.dot -o docs/architecture.png
+ *   dot -Tsvg docs/architecture.dot -o docs/architecture.svg
+ */
+digraph architecture {
+  graph [
+    rankdir=TB,
+    fontname="DejaVu Sans",
+    fontsize=13,
+    nodesep=0.45,
+    ranksep=0.55,
+    compound=true,
+    bgcolor="white",
+    pad="0.25",
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="DejaVu Sans",
+    fontsize=10,
+    fillcolor="#eef2f7",
+    color="#5b6b7c",
+    penwidth=1.1,
+    margin="0.16,0.09"
+  ];
+  edge [
+    fontname="DejaVu Sans",
+    fontsize=9,
+    color="#5b6b7c",
+    arrowsize=0.7,
+    penwidth=1.1
+  ];
+
+  /* ---------------- eksternal ---------------- */
+  yahoo [label="Yahoo Finance\nyfinance (tidak resmi)", fillcolor="#fdf3e3", color="#c98b2e"];
+
+  /* ---------------- host ---------------- */
+  subgraph cluster_host {
+    label="  Host / VM — docker compose  (satu image untuk semua peran)  ";
+    style="rounded";
+    color="#4a6fa5";
+    fontcolor="#1f3b5c";
+    penwidth=1.4;
+
+    engine [label="engine   (batch)\ningest → silver → features\n→ train → predict", fillcolor="#e3ecf7", color="#4a6fa5"];
+
+    subgraph cluster_store {
+      label="  Garage — object storage S3-compatible  ·  API :3900  ·  console :3909  ";
+      style="rounded";
+      color="#2e8b57";
+      fontcolor="#1d5c3a";
+
+      b_bronze [label="bronze\nappend-only\nmentah", fillcolor="#e8f5e9", color="#2e8b57"];
+      b_silver [label="silver\nbersih + DQ\n+ karantina", fillcolor="#e8f5e9", color="#2e8b57"];
+      b_gold   [label="gold\nfitur, kandidat,\nramalan, metrik", fillcolor="#e8f5e9", color="#2e8b57"];
+      b_art    [label="mlartifacts\nmodel.pt\nscaler · ridge", fillcolor="#e8f5e9", color="#2e8b57"];
+
+      /* satu baris, urut mengikuti alur medallion */
+      { rank=same; b_bronze; b_silver; b_gold; b_art; }
+      b_bronze -> b_silver [style=invis];
+      b_silver -> b_gold   [style=invis];
+      b_gold   -> b_art    [style=invis];
+    }
+
+    serving [label="serving   :8080\nFastAPI\nhandler = Azure Function", fillcolor="#e3ecf7", color="#4a6fa5"];
+    dash [label="dashboard   :8501\nStreamlit  (profile ui — dimatikan)", style="rounded,filled,dashed", fillcolor="#f4f4f4", color="#9aa7b4"];
+
+    subgraph cluster_orch {
+      label="  Orkestrasi (Prefect 3)  ";
+      style="rounded,dashed";
+      color="#8fa8c8";
+      fontcolor="#3c5a7a";
+
+      pw   [label="worker\nwork pool: process"];
+      psrv [label="server\n:4200"];
+      pg   [label="metadata\nPostgres 17"];
+    }
+  }
+
+  user [label="Analis / pengguna", shape=oval, fillcolor="#ffffff"];
+
+  /* ---------------- aliran ---------------- */
+  yahoo -> engine [label="HTTPS\n(OHLCV + actions)"];
+  pw -> engine [label="memicu flow", constraint=false];
+  psrv -> pg [dir=both, label="baca/tulis", constraint=false];
+  pw -> psrv [dir=back, label="API", constraint=false];
+
+  engine -> b_bronze [label="tulis"];
+  engine -> b_silver;
+  engine -> b_gold;
+  engine -> b_art;
+
+  b_gold -> serving [label="baca", style=dashed];
+  serving -> user [label="GET /forecast → JSON"];
+  user -> dash [style=dashed, label="(opsional)"];
+  b_gold -> dash [style=dotted, color="#9aa7b4"];
+}

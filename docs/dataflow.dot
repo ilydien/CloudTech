@@ -1,0 +1,91 @@
+/*
+ * Alur data medallion + batas tahap pipeline.
+ * Render:
+ *   dot -Tpng docs/dataflow.dot -o docs/dataflow.png
+ *   dot -Tsvg docs/dataflow.dot -o docs/dataflow.svg
+ */
+digraph dataflow {
+  graph [
+    rankdir=TB,
+    fontname="DejaVu Sans",
+    fontsize=13,
+    nodesep=0.5,
+    ranksep=0.55,
+    compound=true,
+    bgcolor="white",
+    pad="0.25"
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="DejaVu Sans",
+    fontsize=10,
+    fillcolor="#eef2f7",
+    color="#5b6b7c",
+    margin="0.16,0.09"
+  ];
+  edge [
+    fontname="DejaVu Sans",
+    fontsize=9,
+    color="#5b6b7c",
+    arrowsize=0.7
+  ];
+
+  /* tahap */
+  subgraph cluster_s1 {
+    label="  1. ingest  (6 detik)  ";
+    style="rounded,dashed"; color="#c98b2e"; fontcolor="#8a5c12";
+    yf   [label="yfinance\nauto_adjust=False", fillcolor="#fdf3e3", color="#c98b2e"];
+    manifest [label="bronze/_manifest", fillcolor="#e8f5e9", color="#2e8b57"];
+  }
+  subgraph cluster_s2 {
+    label="  2. silver  (4 detik)  ";
+    style="rounded,dashed"; color="#2e8b57"; fontcolor="#1d5c3a";
+    clean [label="dedup · tipe · Parkinson\nffill(limit=3) · panel sesi BEI", fillcolor="#e8f5e9", color="#2e8b57"];
+    dq    [label="_dq · _quarantine", fillcolor="#e8f5e9", color="#2e8b57"];
+    { rank=same; clean; dq; }
+  }
+  subgraph cluster_s3 {
+    label="  3. features  (3 detik)  ";
+    style="rounded,dashed"; color="#4a6fa5"; fontcolor="#1f3b5c";
+    feat  [label="43 fitur lag-1\n+ baris hari-depan", fillcolor="#e3ecf7", color="#4a6fa5"];
+    param [label="gold/params\nc_train · tau", fillcolor="#e3ecf7", color="#4a6fa5"];
+    { rank=same; feat; param; }
+  }
+  subgraph cluster_s4 {
+    label="  4. train  (4 detik)  ";
+    style="rounded,dashed"; color="#7b5ea7"; fontcolor="#4b3468";
+    cand [label="gold/candidates\n5 model · QLIKE val/uji\n· ramalan h=1", fillcolor="#efe8f8", color="#7b5ea7"];
+    champ [label="gold/champion\nmodel terbaik", fillcolor="#efe8f8", color="#7b5ea7"];
+    met  [label="gold/metrics\nQLIKE h=1..7 · DM", fillcolor="#efe8f8", color="#7b5ea7"];
+  }
+  subgraph cluster_s5 {
+    label="  5. predict  (3 detik)  ";
+    style="rounded,dashed"; color="#c0392b"; fontcolor="#8c2a1f";
+    pred [label="gold/predictions\n7 horizon + interval 95%", fillcolor="#fdeaea", color="#c0392b"];
+    pub  [label="gold/published\npenanda lengkap", fillcolor="#fdeaea", color="#c0392b"];
+    { rank=same; pred; pub; }
+  }
+  out [label="Azure Function\nGET /forecast → JSON", shape=oval, fillcolor="#ffffff"];
+  user [label="Dashboard / analis", shape=oval, fillcolor="#ffffff"];
+
+  yf -> manifest [label="bronze"];
+  manifest -> clean [label="baca"];
+
+  clean -> feat;
+  clean -> dq [style=dashed, label="catat"];
+
+  feat -> cand;
+  param -> cand [style=dotted];
+  cand -> champ [label="argmin QLIKE\nval", style=dashed];
+  cand -> met;
+
+  champ -> pred [label="1 baris\nterpilih", style=dashed];
+  pred -> pub;
+  pred -> out;
+  pred -> user [style=dashed];
+
+  /* bukti retrain */
+  log [label="gold/run_log\nsilver · train · predict", style="rounded,filled,dashed", fillcolor="#f6f6f6", color="#9aa7b4"];
+  cand -> log [style=dotted, label="riwayat"];
+}
