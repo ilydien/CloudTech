@@ -10,7 +10,7 @@
 #
 # Pemetaan ke Azure nanti (lihat README):
 #   garage          -> Azure Storage Account (Blob/ADLS Gen2)
-#   prefect-worker  -> Azure Container Apps Job (schedule)
+#   prefect-serve   -> Azure Container Apps Job (schedule)
 #   serving         -> Azure Functions (HTTP trigger, container)
 #   dashboard       -> Azure Container App
 # =============================================================================
@@ -209,8 +209,8 @@ services:
     image: ihsg-mlflow:2.22.0
     restart: unless-stopped
     depends_on:
-      garage:
-        condition: service_healthy
+      garage-init:
+        condition: service_completed_successfully
     entrypoint: ["mlflow"]
     command:
       - "server"

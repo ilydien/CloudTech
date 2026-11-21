@@ -124,7 +124,7 @@ def log_training_run(
                 )
                 model_version = int(registered.version)
                 MlflowClient().set_registered_model_alias(
-                    REGISTERED_MODEL_NAME, CHAMPION_ALIAS, model_version
+                    REGISTERED_MODEL_NAME, CHAMPION_ALIAS, str(model_version)
                 )
 
             return {

@@ -44,7 +44,7 @@ silver:  ## Bangun silver dari bronze
 features:  ## Bangun gold/features + params
 	$(COMPOSE_RUN) features --as-of $(AS_OF)
 
-train:  ## Latih GRU, evaluasi, gate promosi
+train:  ## Latih kandidat (GRU + baseline), evaluasi, gate promosi
 	$(COMPOSE_RUN) train --as-of $(AS_OF) --trigger manual
 
 predict:  ## Ramalan 1..7 hari (butuh champion)
