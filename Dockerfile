@@ -3,7 +3,7 @@
 # Satu image untuk semua peran: engine (batch), prefect server/worker,
 # serving (FastAPI), dashboard (Streamlit), dan nanti Azure Function.
 #
-# Konsekuensinya image menjadi besar (~2.3 GB). Itu pertukaran yang disengaja:
+# Konsekuensinya image menjadi besar (terukur 3.1 GB). Itu pertukaran yang disengaja:
 # satu image = satu versi library = hasil yang reproducible. Kalau nanti Azure
 # Function menolak ukuran ini, pecah menjadi dua Dockerfile (engine vs serving)
 # TANPA mengubah kode: keduanya hanya butuh pyarrow + pandas + fastapi.

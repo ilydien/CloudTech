@@ -44,7 +44,7 @@ Detail perintah `az` ada di [bagian 9](#9-migrasi-ke-azure).
 
 | Keputusan | Alasan |
 |---|---|
-| **Satu image** untuk engine, Prefect, serving, dashboard | satu versi library = satu perilaku. Image yang sama dipakai ulang di Azure. |
+| **Satu image** untuk engine, Prefect, serving, dashboard | satu versi library = satu perilaku. Image yang sama dipakai ulang di Azure. Konsekuensi: ukuran image **3,1 GB** (terukur) — trade-off yang disengaja. |
 | **Handler serving murni** (`ihsg/serving/handler.py`) | FastAPI lokal dan Azure Function memanggil fungsi yang sama → tidak mungkin berbeda. |
 | **Inference di job, bukan di request** | request hanya membaca Parquet (cepat, murah, deterministik). Model artifact tetap disimpan untuk audit. |
 | **`gold/candidates` sebagai sumber prediksi** | menghapus train/serve skew: yang dievaluasi = yang diprediksi. |
