@@ -18,6 +18,7 @@ tanpa torch terpasang.
 from __future__ import annotations
 
 import io
+from contextlib import suppress
 from dataclasses import dataclass
 
 import numpy as np
@@ -118,12 +119,10 @@ def _seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
     np.random.seed(seed)
     torch.set_num_threads(1)
-    try:
-        # Hanya boleh dipanggil sekali per proses. Backfill menjalankan training
-        # berkali-kali dalam satu proses, jadi kegagalan di sini harus diabaikan.
+    # Hanya boleh dipanggil sekali per proses. Backfill menjalankan training
+    # berkali-kali dalam satu proses, jadi kegagalan di sini harus diabaikan.
+    with suppress(RuntimeError):
         torch.set_num_interop_threads(1)
-    except RuntimeError:
-        pass
 
 
 def fit(

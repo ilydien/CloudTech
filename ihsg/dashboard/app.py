@@ -84,7 +84,9 @@ if predictions.empty:
     st.stop()
 
 first = predictions.sort_values("horizon_step").iloc[0]
-model_vol = str(champion["model_vol"].iloc[0]) if not champion.empty else "?"
+# Ambil model dari ramalan itu sendiri, bukan dari champion global: saat
+# menampilkan as_of lama, champion bisa sudah berbeda.
+model_vol = str(predictions.iloc[0].get("model_vol", "?"))
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("As of", as_of)
@@ -132,12 +134,17 @@ with left:
     if vol_eval.empty:
         st.info("gold/vol_eval belum tersedia untuk tanggal ini.")
     else:
-        chart = vol_eval.set_index("date")[["actual_var", "gru_var", "har_var"]].copy()
+        wanted = ["actual_var", f"{model_vol}_var", "har_var", "gru_var"]
+        columns = []
+        for name in wanted:
+            if name in vol_eval.columns and name not in columns:
+                columns.append(name)
+        chart = vol_eval.set_index("date")[columns].copy()
         for column in chart.columns:
             chart[column] = chart[column] ** 0.5
-        st.line_chart(chart.rename(columns={
-            "actual_var": "Aktual", "gru_var": "GRU", "har_var": "HAR",
-        }), height=320)
+        labels = {"actual_var": "Aktual", "har_var": "HAR", "gru_var": "GRU"}
+        labels[f"{model_vol}_var"] = model_vol.upper()
+        st.line_chart(chart.rename(columns=labels), height=320)
         st.caption("Akar varians harian (%) - proxy Parkinson terskala.")
 
 with right:

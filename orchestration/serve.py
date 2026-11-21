@@ -15,11 +15,10 @@ tidak menggandakan data (lihat `ihsg/runlog.py` dan `ihsg/pipelines/*`).
 
 from __future__ import annotations
 
-from prefect import serve
-from prefect.client.schemas.schedules import CronSchedule
-
 from flows.daily_predict import daily_pipeline
 from flows.weekly_retrain import weekly_pipeline
+from prefect import serve
+from prefect.client.schemas.schedules import CronSchedule
 
 JAKARTA = "Asia/Jakarta"
 

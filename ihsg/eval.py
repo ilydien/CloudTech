@@ -67,18 +67,17 @@ def dm_test(loss_model, loss_bench, h: int = 1) -> tuple[float, float]:
     return float(statistic), float(p_value)
 
 
-def clark_west(y, forecast_model, forecast_bench, bench_mean) -> tuple[float, float]:
+def clark_west(y, forecast_model, forecast_bench) -> tuple[float, float]:
     """Clark-West (2007), satu sisi. Model harus bersarang di benchmark.
 
-    Hipotesis nol: tidak ada perbaikan akurasi. p kecil = model lebih baik.
+    Rumus: ``adj = (y - b)^2 - [(y - f)^2 - (b - f)^2]`` dengan ``b`` ramalan
+    benchmark. Hipotesis nol: tidak ada perbaikan akurasi. p kecil = model lebih baik.
     """
     y = np.asarray(y, dtype=float)
     f = np.asarray(forecast_model, dtype=float)
     b = np.asarray(forecast_bench, dtype=float)
-    m = np.asarray(bench_mean, dtype=float)
 
-    error_model = y - f
-    adjusted = (y - m) ** 2 - (error_model**2 - (m - f) ** 2)
+    adjusted = (y - b) ** 2 - ((y - f) ** 2 - (b - f) ** 2)
     sigma = float(adjusted.std(ddof=1))
     mean_adjusted = float(adjusted.mean())
     if len(adjusted) < 3:

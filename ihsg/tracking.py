@@ -45,7 +45,7 @@ def _as_param(value: object) -> str | int | float:
     """MLflow hanya menerima str/int/float sebagai param."""
     if isinstance(value, bool):
         return str(value)
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
+    if isinstance(value, int | float) and not isinstance(value, bool):
         return value
     return str(value)
 

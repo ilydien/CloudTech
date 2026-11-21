@@ -37,7 +37,7 @@ def test_dm_test_detects_better_model():
 def test_clark_west_zero_when_model_equals_benchmark():
     y = np.array([0.5, -0.2, 0.1, 0.3, -0.4, 0.2])
     bench = np.zeros_like(y)
-    statistic, p_value = metrics.clark_west(y, bench, bench, bench)
+    statistic, p_value = metrics.clark_west(y, bench, bench)
     assert abs(statistic) < 1e-9
     assert p_value == pytest.approx(0.5)
 

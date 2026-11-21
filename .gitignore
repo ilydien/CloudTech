@@ -1,10 +1,10 @@
 .env
-state/
-data/
-outputs/
-garage/
-prefect/
-mlflow/
+/state/
+/data/
+/outputs/
+/garage/
+/prefect/
+/mlflow/
 __pycache__/
 *.py[cod]
 .pytest_cache/

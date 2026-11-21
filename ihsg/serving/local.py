@@ -13,7 +13,7 @@ import sys
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from ihsg import __version__, dataset
+from ihsg import __version__
 from ihsg.config import Settings
 from ihsg.serving import handler
 from ihsg.storage import get_sink
@@ -46,17 +46,13 @@ def forecast(as_of: str | None = Query(default=None, description="YYYY-MM-DD")) 
 
 @app.get("/runs")
 def runs(limit: int = Query(default=20, ge=1, le=200)) -> dict:
-    sink = get_sink(settings)
-    frames = [
-        sink.read_parquet(dataset.as_of_key(dataset.GOLD_RUN_LOG, as_of))
-        for as_of in dataset.existing_as_of(sink, dataset.GOLD_RUN_LOG)
-    ]
-    if not frames:
-        return {"runs": []}
-    import pandas as pd
+    from ihsg.runlog import read_runs
 
-    table = pd.concat(frames, ignore_index=True).sort_values("as_of", ascending=False)
-    columns = ["as_of", "run_id", "trigger", "promoted", "val_metric", "test_metric", "duration_s"]
+    table = read_runs(get_sink(settings))
+    if table.empty:
+        return {"runs": []}
+    table = table.sort_values("as_of", ascending=False)
+    columns = ["as_of", "stage", "run_id", "trigger", "promoted", "val_metric", "duration_s"]
     return {"runs": table[columns].head(limit).to_dict(orient="records")}
 
 

@@ -27,7 +27,6 @@ from ihsg.runlog import append_run
 from ihsg.schemas import (
     GOLD_CANDIDATES,
     GOLD_CHAMPION,
-    GOLD_PARAMS,
     GOLD_PREDICTIONS,
     GOLD_PUBLISHED,
     GOLD_REGIME,
@@ -129,7 +128,7 @@ def run(
     rows: list[dict] = []
     cumulative_variance = 0.0
     cumulative_return = 0.0
-    for step, (target_date, path_variance) in enumerate(zip(dates, paths), start=1):
+    for step, (target_date, path_variance) in enumerate(zip(dates, paths, strict=False), start=1):
         mu = ret_next if step == 1 else mean_return
         cumulative_variance += path_variance
         cumulative_return += mu

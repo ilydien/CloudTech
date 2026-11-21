@@ -21,15 +21,14 @@ from ihsg.config import Settings
 from ihsg.instruments import INDEX_KEY, get_instruments
 from ihsg.providers import download_raw, provider_version
 from ihsg.quality import (
+    HARD,
+    SOFT,
+    QualityError,
     check_freshness,
     check_not_null,
     check_positive,
-    HARD,
-    QualityError,
-    SOFT,
 )
 from ihsg.schemas import (
-    BRONZE_ACTIONS,
     BRONZE_MANIFEST,
     BRONZE_PRICES,
     fingerprint,

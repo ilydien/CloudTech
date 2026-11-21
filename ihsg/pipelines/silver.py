@@ -20,9 +20,9 @@ from ihsg import dataset, indicators
 from ihsg.config import Settings
 from ihsg.instruments import INDEX_KEY, Instrument, get_instruments
 from ihsg.quality import (
-    CheckResult,
     HARD,
     SOFT,
+    CheckResult,
     check_calendar_gaps,
     check_freshness,
     check_not_null,

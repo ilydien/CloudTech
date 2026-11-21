@@ -34,7 +34,7 @@ Versi vektor: [`docs/dataflow.svg`](docs/dataflow.svg).
 | Docker (sekarang) | Azure (nanti) | Perubahan kode |
 |---|---|---|
 | `garage` | Storage Account (Blob / ADLS Gen2) | implementasi `Sink` baru |
-| `engine` + `prefect-worker` | Container Apps Job (timer trigger) | nol — image sama |
+| `engine` + `prefect-serve` | Container Apps Job (timer trigger) | nol — image sama |
 | `serving` | Azure Function (HTTP) | `function_app/` sudah ada |
 | `dashboard` | Container App (min replica 0) | nol |
 
@@ -305,7 +305,7 @@ Yang **tidak** deterministik dan sengaja diterima: kolom informasional
 | Docker | Azure | Perubahan kode |
 |---|---|---|
 | `garage` | Storage Account (Blob) / ADLS Gen2 | implementasi `Sink` baru (`ABFSSink`), sisa kode tetap |
-| `engine` + `prefect-worker` | **Container Apps Job** (schedule) | nol — image sama, cukup `--cron-expression` |
+| `engine` + `prefect-serve` | **Container Apps Job** (schedule) | nol — image sama, cukup `--cron-expression` |
 | `serving` | **Azure Functions** (HTTP) | `function_app/` sudah ada |
 | `dashboard` | Container App (min replica 0) | nol |
 | `.env` | App Settings + Key Vault | ganti sumber env |

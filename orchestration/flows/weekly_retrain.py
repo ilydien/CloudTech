@@ -34,7 +34,7 @@ def weekly_pipeline(as_of: str | None = None) -> dict:
         train_result["run_id"],
         train_result["promoted"],
         train_result["val_qlike"],
-        train_result["test_qlike"],
+        train_result["test_qlike"] or float("nan"),
     )
 
     predict_result = predict_pipeline.run(settings, resolved)

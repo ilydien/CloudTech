@@ -94,7 +94,6 @@ class Settings:
     ewma_lambda: float
 
     # serving
-    live_inference: bool
     admin_token: str | None
 
     @classmethod
@@ -129,7 +128,6 @@ class Settings:
             ridge_alpha=env_float("RIDGE_ALPHA", 1000.0),
             ml_gate_alpha=env_float("ML_GATE_ALPHA", 0.05),
             ewma_lambda=env_float("EWMA_LAMBDA", 0.94),
-            live_inference=env_bool("LIVE_INFERENCE", False),
             admin_token=env("ADMIN_TOKEN"),
         )
 

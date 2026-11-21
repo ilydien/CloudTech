@@ -302,6 +302,7 @@ GOLD_VOL_EVAL = Contract(
         "date": "datetime",
         "actual_var": "float",
         "gru_var": "float",
+        "garch_var": "float",
         "har_var": "float",
         "ewma_var": "float",
         "hist_var": "float",

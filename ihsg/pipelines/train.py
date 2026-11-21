@@ -27,12 +27,12 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import Ridge
 
-from ihsg import dataset, eval as metrics
+from ihsg import dataset, tracking
+from ihsg import eval as metrics
 from ihsg.config import JAKARTA_TZ, Settings
 from ihsg.models import baselines, seq
 from ihsg.pipelines.features import TARGET_COLUMNS
 from ihsg.runlog import append_run, git_sha
-from ihsg import tracking
 from ihsg.schemas import (
     GOLD_CANDIDATES,
     GOLD_CHAMPION,
@@ -378,7 +378,7 @@ def run(
     expanding_mean = pd.Series(returns[:n_real]).expanding(min_periods=30).mean().shift(1).to_numpy()
     val_r2 = metrics.r2_oos(returns[i_tr:i_va], ret_val, expanding_mean[i_tr:i_va])
     _, val_cw_p = metrics.clark_west(
-        returns[i_tr:i_va], ret_val, expanding_mean[i_tr:i_va], expanding_mean[i_tr:i_va]
+        returns[i_tr:i_va], ret_val, expanding_mean[i_tr:i_va]
     )
     ml_return_enabled = bool(
         np.isfinite(val_r2) and val_r2 > 0
@@ -388,7 +388,7 @@ def run(
     ret_test = ridge.predict(raw[i_va:n_real])
     test_r2 = metrics.r2_oos(returns[i_va:n_real], ret_test, expanding_mean[i_va:n_real])
     _, test_cw_p = metrics.clark_west(
-        returns[i_va:n_real], ret_test, expanding_mean[i_va:n_real], expanding_mean[i_va:n_real]
+        returns[i_va:n_real], ret_test, expanding_mean[i_va:n_real]
     )
     for split_name, value in (("val", val_r2), ("test", test_r2)):
         metric_rows.append(
@@ -509,6 +509,7 @@ def run(
         "date": frame["date"].to_numpy()[test_ends],
         "actual_var": tv[test_ends],
         "gru_var": gru_var[test_ends],
+        "garch_var": forecasts["garch"][test_ends] if "garch" in forecasts else np.nan,
         "har_var": har[test_ends],
         "ewma_var": forecasts["ewma"][test_ends],
         "hist_var": forecasts["hist"][test_ends],

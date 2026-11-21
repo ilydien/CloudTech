@@ -12,9 +12,9 @@ lazy dari ``ihsg.tracking`` supaya `import ihsg` tetap ringan.
 
 from __future__ import annotations
 
+import mlflow.pyfunc
 import numpy as np
 import pandas as pd
-import mlflow.pyfunc
 
 FLAT_MODELS = ("hist", "ewma")
 
