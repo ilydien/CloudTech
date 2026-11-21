@@ -1,7 +1,7 @@
 """Abstraksi penyimpanan (medallion) untuk Parquet dan artefak model.
 
-Satu-satunya tempat yang tahu apakah data ada di filesystem atau di object
-storage S3-compatible (Garage/MinIO/Azure Blob via gateway S3).
+Satu-satunya tempat yang tahu apakah data ada di filesystem, di object storage
+S3-compatible (Garage/MinIO), atau di Azure Blob Storage / ADLS Gen2.
 
 Key selalu berbentuk ``<bucket>/<path>/data.parquet``:
 
@@ -9,9 +9,9 @@ Key selalu berbentuk ``<bucket>/<path>/data.parquet``:
     gold/predictions/as_of=2026-11-13/data.parquet
     mlartifacts/run_id=abc123/model.pt
 
-Segmen pertama adalah bucket (bronze/silver/gold/mlartifacts), sisanya path di
-dalam bucket. Dengan begitu satu key namespace berlaku untuk lokal maupun S3,
-dan pindah ke Azure cukup dengan mengimplementasikan ``Sink`` baru.
+Segmen pertama adalah bucket/container (bronze/silver/gold/mlartifacts), sisanya
+path di dalam bucket. Dengan begitu satu key namespace berlaku untuk lokal, S3,
+maupun Azure.
 """
 
 from __future__ import annotations
@@ -209,21 +209,167 @@ class S3Sink(Sink):
             self._fs.rm(full)
 
 
-def _build_sink(kind: str, endpoint: str, region: str, access: str, secret: str) -> Sink:
+def _is_not_found(error: Exception) -> bool:
+    try:
+        from azure.core.exceptions import ResourceNotFoundError
+
+        if isinstance(error, ResourceNotFoundError):
+            return True
+    except ImportError:
+        pass
+    return getattr(error, "status_code", None) == 404
+
+
+def _is_already_exists(error: Exception) -> bool:
+    try:
+        from azure.core.exceptions import ResourceExistsError
+
+        if isinstance(error, ResourceExistsError):
+            return True
+    except ImportError:
+        pass
+    return getattr(error, "status_code", None) == 409
+
+
+class AzureBlobSink(Sink):
+    """Azure Blob Storage / ADLS Gen2 via Managed Identity atau connection string."""
+
+    def __init__(
+        self,
+        *,
+        account_url: str | None = None,
+        connection_string: str | None = None,
+        service_client: object | None = None,
+    ) -> None:
+        if service_client is not None:
+            self._service = service_client
+            self._credential = None
+            return
+
+        from azure.storage.blob import BlobServiceClient  # impor lazy
+
+        if connection_string:
+            self._credential = None
+            self._service = BlobServiceClient.from_connection_string(connection_string)
+            return
+        if not account_url:
+            raise SinkError(
+                "SINK=azure membutuhkan AZURE_STORAGE_ACCOUNT_URL "
+                "(atau AZURE_STORAGE_CONNECTION_STRING)"
+            )
+
+        from azure.identity import DefaultAzureCredential
+
+        self._credential = DefaultAzureCredential()
+        self._service = BlobServiceClient(account_url=account_url, credential=self._credential)
+
+    @staticmethod
+    def _split_blob(key: str) -> tuple[str, str]:
+        bucket, blob_name = _split_key(key)
+        if not blob_name:
+            raise SinkError(f"key tidak valid (path blob kosong): {key!r}")
+        return bucket, blob_name
+
+    def exists(self, key: str) -> bool:
+        bucket, blob_name = self._split_blob(key)
+        try:
+            return bool(self._service.get_blob_client(bucket, blob_name).exists())
+        except Exception as error:
+            if _is_not_found(error):
+                return False
+            raise
+
+    def read_parquet(self, key: str) -> pd.DataFrame:
+        raw = self.read_bytes(key)
+        return pq.read_table(pa.BufferReader(raw)).to_pandas()
+
+    def write_parquet(self, df: pd.DataFrame, key: str, *, overwrite: bool = True) -> bool:
+        buffer = pa.BufferOutputStream()
+        pq.write_table(self._to_table(df), buffer, compression="snappy")
+        return self.write_bytes(buffer.getvalue().to_pybytes(), key, overwrite=overwrite)
+
+    def write_bytes(self, data: bytes, key: str, *, overwrite: bool = True) -> bool:
+        bucket, blob_name = self._split_blob(key)
+        client = self._service.get_blob_client(bucket, blob_name)
+        try:
+            client.upload_blob(data, overwrite=overwrite)
+        except Exception as error:
+            if not overwrite and _is_already_exists(error):
+                return False
+            raise
+        return True
+
+    def read_bytes(self, key: str) -> bytes:
+        bucket, blob_name = self._split_blob(key)
+        client = self._service.get_blob_client(bucket, blob_name)
+        try:
+            return client.download_blob().readall()
+        except Exception as error:
+            if _is_not_found(error):
+                raise SinkError(f"objek tidak ditemukan: {key}") from error
+            raise
+
+    def list_keys(self, prefix: str) -> list[str]:
+        prefix_clean = prefix.rstrip("/")
+        bucket, rest = _split_key(prefix_clean)
+        full_prefix = f"{bucket}/{rest}" if rest else bucket
+        container = self._service.get_container_client(bucket)
+        name_starts_with = rest or None
+        keys: list[str] = []
+        try:
+            for blob in container.list_blobs(name_starts_with=name_starts_with):
+                metadata = getattr(blob, "metadata", None) or {}
+                if metadata.get("hdi_isfolder") == "true" or blob.name.endswith("/"):
+                    continue
+                full_key = f"{bucket}/{blob.name}"
+                if full_key.startswith(full_prefix):
+                    keys.append(full_key)
+        except Exception as error:
+            if _is_not_found(error):
+                return []
+            raise
+        return sorted(keys)
+
+    def delete(self, key: str) -> None:
+        bucket, blob_name = self._split_blob(key)
+        client = self._service.get_blob_client(bucket, blob_name)
+        try:
+            client.delete_blob()
+        except Exception as error:
+            if not _is_not_found(error):
+                raise
+
+
+def _build_sink(kind: str, a: str, b: str, c: str, d: str) -> Sink:
     if kind == "local":
-        return LocalSink(endpoint)  # pada mode local, "endpoint" = root path
-    return S3Sink(endpoint_url=endpoint, region=region, access_key=access, secret_key=secret)
+        return LocalSink(a)  # pada mode local, argumen pertama = root path
+    if kind == "azure":
+        return AzureBlobSink(account_url=a or None, connection_string=b or None)
+    return S3Sink(endpoint_url=a, region=b, access_key=c, secret_key=d)
 
 
 @lru_cache(maxsize=8)
-def _cached_sink(kind: str, endpoint: str, region: str, access: str, secret: str) -> Sink:
-    return _build_sink(kind, endpoint, region, access, secret)
+def _cached_sink(kind: str, a: str, b: str, c: str, d: str) -> Sink:
+    return _build_sink(kind, a, b, c, d)
 
 
 def get_sink(settings: Settings) -> Sink:
     """Sink sesuai ``SINK`` di environment (di-cache per konfigurasi)."""
     if settings.sink == "local":
         return _cached_sink("local", settings.local_root, "-", "-", "-")
+    if settings.sink == "azure":
+        if not settings.azure_storage_account_url and not settings.azure_storage_connection_string:
+            raise SinkError(
+                "SINK=azure membutuhkan AZURE_STORAGE_ACCOUNT_URL "
+                "(atau AZURE_STORAGE_CONNECTION_STRING)"
+            )
+        return _cached_sink(
+            "azure",
+            settings.azure_storage_account_url or "",
+            settings.azure_storage_connection_string or "",
+            "-",
+            "-",
+        )
     if not settings.s3_endpoint_url or not settings.s3_access_key or not settings.s3_secret_key:
         raise SinkError(
             "SINK=s3 membutuhkan S3_ENDPOINT_URL, S3_ACCESS_KEY (atau GARAGE_DEFAULT_ACCESS_KEY), "

@@ -71,6 +71,8 @@ class Settings:
     s3_region: str
     s3_access_key: str | None
     s3_secret_key: str | None
+    azure_storage_account_url: str | None
+    azure_storage_connection_string: str | None
 
     # pemodelan
     seed: int
@@ -98,6 +100,12 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> Settings:
+        account_url = env("AZURE_STORAGE_ACCOUNT_URL")
+        if account_url is None:
+            account_name = env("AZURE_STORAGE_ACCOUNT_NAME")
+            if account_name:
+                account_url = f"https://{account_name}.blob.core.windows.net"
+
         return cls(
             as_of=env("AS_OF"),
             start_date=env("START_DATE", "2018-01-01") or "2018-01-01",
@@ -109,6 +117,8 @@ class Settings:
             s3_region=env("S3_REGION", "garage") or "garage",
             s3_access_key=env("S3_ACCESS_KEY") or env("GARAGE_DEFAULT_ACCESS_KEY"),
             s3_secret_key=env("S3_SECRET_KEY") or env("GARAGE_DEFAULT_SECRET_KEY"),
+            azure_storage_account_url=account_url,
+            azure_storage_connection_string=env("AZURE_STORAGE_CONNECTION_STRING"),
             seed=env_int("SEED", 42),
             window=env_int("WINDOW", 22),
             horizons=env_int("HORIZONS", 7),
@@ -156,8 +166,8 @@ class Settings:
     # -- validasi -----------------------------------------------------------
     def validate(self) -> None:
         problems: list[str] = []
-        if self.sink not in {"local", "s3"}:
-            problems.append(f"SINK harus 'local' atau 's3', bukan {self.sink!r}")
+        if self.sink not in {"local", "s3", "azure"}:
+            problems.append(f"SINK harus 'local', 's3', atau 'azure', bukan {self.sink!r}")
         if not 0.1 <= self.train_frac <= 0.9:
             problems.append("TRAIN_FRAC harus di antara 0.1 dan 0.9")
         if not 0.0 <= self.val_frac <= 0.5:
@@ -170,6 +180,15 @@ class Settings:
             problems.append("HORIZONS minimal 1")
         if self.sink == "s3" and not self.s3_endpoint_url:
             problems.append("SINK=s3 membutuhkan S3_ENDPOINT_URL")
+        if (
+            self.sink == "azure"
+            and not self.azure_storage_account_url
+            and not self.azure_storage_connection_string
+        ):
+            problems.append(
+                "SINK=azure membutuhkan AZURE_STORAGE_ACCOUNT_URL "
+                "(atau AZURE_STORAGE_CONNECTION_STRING)"
+            )
         if problems:
             raise ValueError("Konfigurasi tidak valid:\n- " + "\n- ".join(problems))
 

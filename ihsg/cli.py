@@ -214,7 +214,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     def common(target: argparse.ArgumentParser) -> None:
         target.add_argument("--as-of", default=None, help="YYYY-MM-DD atau 'auto'")
-        target.add_argument("--sink", choices=["local", "s3"], default=None)
+        target.add_argument("--sink", choices=["local", "s3", "azure"], default=None)
 
     ingest = sub.add_parser("ingest", help="unduh bronze (append-only)")
     common(ingest)
@@ -250,15 +250,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     verify = sub.add_parser("verify", help="bangun payload dan cetak hash-nya")
     verify.add_argument("--as-of", default=None)
-    verify.add_argument("--sink", choices=["local", "s3"], default=None)
+    verify.add_argument("--sink", choices=["local", "s3", "azure"], default=None)
     verify.set_defaults(func=cmd_verify)
 
     report = sub.add_parser("report", help="tabel riwayat run/retrain")
-    report.add_argument("--sink", choices=["local", "s3"], default=None)
+    report.add_argument("--sink", choices=["local", "s3", "azure"], default=None)
     report.set_defaults(func=cmd_report)
 
     doctor = sub.add_parser("doctor", help="cek konektivitas storage")
-    doctor.add_argument("--sink", choices=["local", "s3"], default=None)
+    doctor.add_argument("--sink", choices=["local", "s3", "azure"], default=None)
     doctor.set_defaults(func=cmd_doctor)
 
     return parser

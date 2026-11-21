@@ -18,8 +18,9 @@ def _isolated_env(monkeypatch):
     """Pastikan test tidak mewarisi environment pengembang."""
     for name in (
         "AS_OF", "SINK", "S3_ENDPOINT_URL", "S3_ACCESS_KEY", "S3_SECRET_KEY",
-        "GARAGE_DEFAULT_ACCESS_KEY", "GARAGE_DEFAULT_SECRET_KEY", "IDX_HOLIDAYS",
-        "TICKERS", "ADMIN_TOKEN",
+        "GARAGE_DEFAULT_ACCESS_KEY", "GARAGE_DEFAULT_SECRET_KEY",
+        "AZURE_STORAGE_ACCOUNT_URL", "AZURE_STORAGE_ACCOUNT_NAME",
+        "AZURE_STORAGE_CONNECTION_STRING", "IDX_HOLIDAYS", "TICKERS", "ADMIN_TOKEN",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("SINK", "local")
