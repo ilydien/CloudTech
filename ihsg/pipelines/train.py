@@ -301,7 +301,7 @@ def run(
         X[val_mask], y_var[val_mask], y_regime[val_mask],
         n_features=len(feature_names), config=config,
     )
-    model = fitted["model"]
+    gru_model = fitted["model"]
 
     # --- baseline walk-forward --------------------------------------------
     forecasts: dict[str, np.ndarray] = {
@@ -318,7 +318,7 @@ def run(
     garch_persistence = np.full(n_real, np.nan)
     try:
         garch, uncond_series, persistence_series = baselines.garch_walk_forward(
-            returns[:n_real], i_tr, n_real, "garch", settings.refit_every
+            returns[:n_real], i_tr, n_real, "gjr", settings.refit_every
         )
         garch_full = np.full(n_real, np.nan)
         garch_full[i_tr:n_real] = garch
@@ -328,19 +328,19 @@ def run(
     except Exception:  # noqa: BLE001 - arch tidak wajib untuk menjalankan pipeline
         pass
 
-    # --- prediksi GRU walk-forward-in-sample -------------------------------
+    # --- prediksi GRU walk-forward-in-sample ------------------------------
     gru_var = np.full(n_real, np.nan)
     gru_prob = np.full(n_real, np.nan)
-    var_all, prob_all = seq.predict(model, X)
-    gru_var[ends] = var_all
-    gru_prob[ends] = prob_all
+    var_all_gru, prob_all_gru = seq.predict(gru_model, X)
+    gru_var[ends] = var_all_gru
+    gru_prob[ends] = prob_all_gru
     forecasts["gru"] = gru_var
 
     # Ramalan h=1 untuk sesi berikutnya (baris fitur terakhir = hari depan).
     window_input = scaled[-settings.window :][None, :, :]
-    gru_next_var, gru_next_prob = seq.predict(model, window_input)
+    gru_next_var, gru_next_prob = seq.predict(gru_model, window_input)
     gru_next = float(gru_next_var[0])
-    prob_next = float(gru_next_prob[0])
+    gru_prob_next = float(gru_next_prob[0])
 
     # --- metrik h=1 --------------------------------------------------------
     metric_rows: list[dict] = []
@@ -418,7 +418,7 @@ def run(
             "val_qlike": val_qlike.get("gru", np.nan),
             "test_qlike": test_qlike.get("gru", np.nan),
             "h1_var": gru_next, "uncond": long_run, "persistence": persistence,
-            "prob_high": prob_next, "selected": False,
+            "prob_high": gru_prob_next, "selected": False,
         },
         {
             "as_of": as_of, "run_id": run_id, "model": "har",
@@ -445,7 +445,7 @@ def run(
     if "garch" in forecasts:
         try:
             garch_next, garch_next_uncond, garch_next_persistence = baselines.garch_forecast_next(
-                returns, n_real, "garch"
+                returns, n_real, "gjr"
             )
             candidates_rows.append(
                 {
@@ -522,7 +522,7 @@ def run(
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    model_blob = seq.dumps(model, config, settings.window, len(feature_names), feature_names)
+    model_blob = seq.dumps(gru_model, config, settings.window, len(feature_names), feature_names)
     scaler_frame = pd.DataFrame({"feature": feature_names, "mean": mean, "scale": scale})
     scaler_buffer = io.BytesIO()
     pq.write_table(

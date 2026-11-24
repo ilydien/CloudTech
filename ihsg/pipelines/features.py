@@ -71,6 +71,20 @@ def build_frame(panel: pd.DataFrame, settings: Settings, as_of: str) -> tuple[pd
     features[f"{INDEX_KEY}_park_ma5_lag1"] = index_park.rolling(5).mean()
     features[f"{INDEX_KEY}_park_ma22_lag1"] = index_park.rolling(22).mean()
 
+    # Asymmetric downside volatility / Realized semivariance (Bollerslev et al., 2020; Vander Elst et al., 2024)
+    # Memisahkan varians guncangan negatif (bad volatility / panic) dan positif (good volatility)
+    neg_ret = np.where(index_ret < 0, index_ret, 0.0)
+    pos_ret = np.where(index_ret > 0, index_ret, 0.0)
+    features[f"{INDEX_KEY}_downside_sq_ret_lag1"] = pd.Series(neg_ret**2, index=frame.index)
+    features[f"{INDEX_KEY}_upside_sq_ret_lag1"] = pd.Series(pos_ret**2, index=frame.index)
+    features[f"{INDEX_KEY}_downside_rv5_lag1"] = pd.Series(neg_ret**2, index=frame.index).rolling(5).mean()
+    features[f"{INDEX_KEY}_downside_rv22_lag1"] = pd.Series(neg_ret**2, index=frame.index).rolling(22).mean()
+
+    if "DJI_ret_lag1" in features:
+        dji_ret = features["DJI_ret_lag1"]
+        dji_neg = np.where(dji_ret < 0, dji_ret, 0.0)
+        features["DJI_downside_sq_ret_lag1"] = pd.Series(dji_neg**2, index=frame.index)
+
     out = pd.DataFrame(features)
     index_close = frame[f"{INDEX_KEY}_close"].astype(float)
     index_adj = frame[f"{INDEX_KEY}_adj_close"].astype(float)
