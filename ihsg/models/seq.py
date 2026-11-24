@@ -60,11 +60,23 @@ class TrainConfig:
 
 if TORCH_AVAILABLE:  # pragma: no branch
 
+    def qlike_loss(log_pred: torch.Tensor, log_true: torch.Tensor) -> torch.Tensor:
+        """QLIKE loss in log-space: actual / forecast - log(actual / forecast) - 1.
+
+        Ref: Patton (2011); Christensen, Siggaard, & Veliyev (2023).
+        diff = log_true - log_pred
+        ratio = exp(diff)
+        qlike = ratio - diff - 1
+        """
+        diff = torch.clamp(log_true - log_pred, min=-10.0, max=10.0)
+        return torch.mean(torch.exp(diff) - diff - 1.0)
+
     class GRUForecaster(nn.Module):  # type: ignore[misc]
-        """GRU -> dua head linear (log-varians, logit rezim HIGH)."""
+        """GRU -> LayerNorm + Dropout -> dua head linear (log-varians, logit rezim HIGH)."""
 
         def __init__(self, n_features: int, hidden: int, layers: int, dropout: float) -> None:
             super().__init__()
+            self.arch_name = "gru"
             self.gru = nn.GRU(
                 input_size=n_features,
                 hidden_size=hidden,
@@ -72,17 +84,23 @@ if TORCH_AVAILABLE:  # pragma: no branch
                 batch_first=True,
                 dropout=dropout if layers > 1 else 0.0,
             )
+            self.norm = nn.LayerNorm(hidden)
+            self.drop = nn.Dropout(dropout)
             self.head_variance = nn.Linear(hidden, 1)
             self.head_regime = nn.Linear(hidden, 1)
 
         def forward(self, x):  # noqa: ANN001, ANN201
             output, _ = self.gru(x)
-            last = output[:, -1, :]
+            last = self.drop(self.norm(output[:, -1, :]))
             return self.head_variance(last).squeeze(-1), self.head_regime(last).squeeze(-1)
 
 else:  # pragma: no cover
 
     class GRUForecaster:  # type: ignore[no-redef]
+        def __init__(self, *args, **kwargs) -> None:
+            require_torch()
+
+    class BiGRUAttentionForecaster:  # type: ignore[no-redef]
         def __init__(self, *args, **kwargs) -> None:
             require_torch()
 
@@ -144,8 +162,14 @@ def fit(
     optimizer = torch.optim.Adam(
         model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay
     )
-    mse = nn.MSELoss()
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=config.epochs, eta_min=1e-5
+    )
     bce = nn.BCEWithLogitsLoss()
+
+    # Exponential Moving Average (EMA) of weights (Izmailov et al., 2018)
+    ema_decay = 0.99
+    ema_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
 
     tensors = {
         "x": torch.from_numpy(X_train),
@@ -170,19 +194,30 @@ def fit(
             batch = permutation[start : start + config.batch_size]
             optimizer.zero_grad()
             log_var, logit = model(tensors["x"][batch])
-            loss = mse(log_var, tensors["yv"][batch]) + config.classification_weight * bce(
+            loss = qlike_loss(log_var, tensors["yv"][batch]) + config.classification_weight * bce(
                 logit, tensors["yr"][batch]
             )
             loss.backward()
+            # Gradient clipping to prevent gradient explosion on fat-tailed market shocks
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+
+            # Update EMA weights
+            with torch.no_grad():
+                for k, v in model.state_dict().items():
+                    ema_state[k].mul_(ema_decay).add_(v, alpha=1.0 - ema_decay)
+
             total += float(loss.item()) * len(batch)
         train_loss = total / max(len(permutation), 1)
 
+        # Evaluasi validasi menggunakan EMA state untuk generalisasi yang lebih mulus
+        raw_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
+        model.load_state_dict(ema_state)
         model.eval()
         with torch.no_grad():
             log_var_val, logit_val = model(tensors["xv"])
             val_loss = float(
-                mse(log_var_val, tensors["yvv"]).item()
+                qlike_loss(log_var_val, tensors["yvv"]).item()
                 + config.classification_weight * bce(logit_val, tensors["yrv"]).item()
             )
 
@@ -192,11 +227,16 @@ def fit(
             best_loss = val_loss
             best_epoch = epoch
             best_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
+            best_state = {key: value.detach().clone() for key, value in ema_state.items()}
             stale = 0
         else:
             stale += 1
             if stale >= config.patience:
                 break
+
+        # Kembalikan raw_state untuk training epoch berikutnya + step learning rate scheduler
+        model.load_state_dict(raw_state)
+        scheduler.step()
 
     if best_state is not None:
         model.load_state_dict(best_state)
@@ -226,6 +266,7 @@ def dumps(model, config: TrainConfig, window: int, n_features: int, feature_name
     buffer = io.BytesIO()
     torch.save(
         {
+            "arch": getattr(model, "arch_name", "gru"),
             "state_dict": model.state_dict(),
             "config": config.__dict__,
             "window": window,

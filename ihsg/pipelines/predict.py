@@ -81,7 +81,9 @@ def run(
     persistence = float(np.clip(row["persistence"], 0.0, 0.9999))
     run_id = str(row["run_id"])
 
-    gru_rows = candidates[candidates["model"] == "gru"]
+    gru_rows = candidates[candidates["model"] == model_vol]
+    if gru_rows.empty or not np.isfinite(gru_rows["prob_high"].iloc[0]):
+        gru_rows = candidates[candidates["model"] == "gru"]
     prob_high = (
         float(gru_rows["prob_high"].iloc[0])
         if not gru_rows.empty and np.isfinite(gru_rows["prob_high"].iloc[0])
