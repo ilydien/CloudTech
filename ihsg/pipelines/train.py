@@ -625,7 +625,7 @@ def run(
             "uncond": float(selected_row["uncond"]),
             "persistence": float(selected_row["persistence"]),
             "tau": tau,
-            "prob_high": prob_next,
+            "prob_high": gru_prob_next,
         } if promoted else None,
     )
 

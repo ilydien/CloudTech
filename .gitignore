@@ -19,3 +19,5 @@ venv/
 *.joblib
 # artefak browser automation
 .playwright-mcp/
+# hasil salinan build Azure Function (dibuat ulang oleh make func-bundle)
+/function_app/ihsg/

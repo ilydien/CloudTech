@@ -9,10 +9,11 @@ ENGINE  := $(COMPOSE) --profile run run --rm engine
 AS_OF   ?= auto
 START   ?=
 END     ?=
+FN      ?= fn-ihsg-kel3
 COMPOSE_RUN := $(COMPOSE) --profile run run --rm engine
 
 .DEFAULT_GOAL := help
-.PHONY: help up down ps logs doctor ingest silver features train predict run backfill retrain4 serve mlflow dash test lint fmt clean shell diagram
+.PHONY: help up down ps logs doctor ingest silver features train predict run backfill retrain4 serve mlflow dash func-bundle func-publish test lint fmt clean shell diagram
 
 help:  ## Tampilkan daftar target
 	@grep -E '^[a-zA-Z0-9_]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -74,6 +75,12 @@ mlflow:  ## Buka MLflow UI (http://localhost:5000)
 dash:  ## Nyalakan dashboard Streamlit
 	$(COMPOSE) --profile ui up -d dashboard
 	@echo "Dashboard: http://localhost:8501"
+
+func-bundle:  ## Salin modul ihsg minimal ke function_app/ihsg sebelum publish ke Azure
+	bash function_app/bundle.sh
+
+func-publish: func-bundle  ## Publish Azure Function (isi FN=... bila nama berbeda)
+	cd function_app && func azure functionapp publish $(FN)
 
 test:  ## Jalankan unit test di dalam container
 	$(COMPOSE) run --rm --no-deps --entrypoint python engine -m pytest -q
