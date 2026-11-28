@@ -80,7 +80,7 @@ func-bundle:  ## Salin modul ihsg minimal ke function_app/ihsg sebelum publish k
 	bash function_app/bundle.sh
 
 func-publish: func-bundle  ## Publish Azure Function (isi FN=... bila nama berbeda)
-	cd function_app && func azure functionapp publish $(FN)
+	cd function_app && func azure functionapp publish $(FN) --python
 
 test:  ## Jalankan unit test di dalam container
 	$(COMPOSE) run --rm --no-deps --entrypoint python engine -m pytest -q

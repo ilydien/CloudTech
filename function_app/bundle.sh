@@ -8,7 +8,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SRC="$REPO_ROOT/ihsg"
 DST="$SCRIPT_DIR/ihsg"
 
-rm -rf "$DST"
+rm -rf "$DST" "$SCRIPT_DIR/__pycache__"
 mkdir -p "$DST/serving"
 
 FILES=(

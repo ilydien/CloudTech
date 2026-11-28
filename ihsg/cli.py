@@ -29,7 +29,7 @@ import traceback
 import pandas as pd
 
 from ihsg import dataset
-from ihsg.config import Settings
+from ihsg.config import Settings, env, env_bool
 from ihsg.pipelines import features as features_pipeline
 from ihsg.pipelines import ingest as ingest_pipeline
 from ihsg.pipelines import predict as predict_pipeline
@@ -95,18 +95,20 @@ def cmd_run(args: argparse.Namespace) -> dict:
     # Job harian karena itu melatih lebih dulu bila kandidat hari itu belum ada
     # (biayanya ±3 detik; gate promosi mencegah champion berubah tanpa alasan).
     sink = get_sink(settings)
-    needs_training = args.retrain or not sink.exists(
+    retrain = bool(args.retrain or env_bool("RETRAIN", False))
+    trigger = args.trigger or env("TRIGGER", "schedule") or "schedule"
+    needs_training = retrain or not sink.exists(
         dataset.as_of_key(dataset.GOLD_CANDIDATES, as_of)
     )
 
     stages: list[dict] = [
         ingest_result,
-        silver_pipeline.run(settings, as_of, trigger=args.trigger),
+        silver_pipeline.run(settings, as_of, trigger=trigger),
         features_pipeline.run(settings, as_of),
     ]
     if needs_training:
-        stages.append(train_pipeline.run(settings, as_of, trigger=args.trigger))
-    stages.append(predict_pipeline.run(settings, as_of, trigger=args.trigger))
+        stages.append(train_pipeline.run(settings, as_of, trigger=trigger))
+    stages.append(predict_pipeline.run(settings, as_of, trigger=trigger))
     return {"stage": "run", "as_of": as_of, "trained": needs_training, "stages": stages}
 
 
@@ -238,7 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="ingest -> silver -> features -> [train] -> predict")
     common(run)
     run.add_argument("--retrain", action="store_true")
-    run.add_argument("--trigger", default="schedule", choices=["manual", "schedule", "backfill", "api"])
+    run.add_argument("--trigger", default=None, choices=["manual", "schedule", "backfill", "api"])
     run.set_defaults(func=cmd_run)
 
     backfill = sub.add_parser("backfill", help="jalankan pipeline untuk rentang tanggal")
